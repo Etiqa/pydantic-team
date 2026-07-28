@@ -6,10 +6,11 @@
 
 Type-safe team orchestration for [`pydantic-ai`](https://ai.pydantic.dev) Agents.
 
-v1 focuses on **hierarchical** (leader + specialists) teams — the same idea as Agno's
-`TeamMode.coordinate` and pydantic-ai
-[agent delegation](https://ai.pydantic.dev/multi-agent-applications/), without hiding
-usage/token tracking.
+v1 provides **hierarchical** and **collaborative** teams for
+[`pydantic-ai`](https://ai.pydantic.dev) Agents:
+
+- `HierarchicalTeam` — leader delegates via tools (Agno coordinate / agent delegation)
+- `CollaborativeTeam` — shared task board with parallel claim/assign
 
 For **sequential**, branching, or stateful pipelines, use
 [`pydantic-graph`](https://ai.pydantic.dev/graph/) (already pulled in by `pydantic-ai`).
@@ -81,6 +82,27 @@ You can also pass an existing `leader_agent=` instead of `leader_model=`. Nested
 
 See the [hierarchical teams guide](docs/hierarchical.md) for nested teams, usage
 details, and `TestModel` testing.
+
+## CollaborativeTeam
+
+Shared [`TaskBoard`](docs/collaborative.md): the leader creates/assigns tasks; members
+claim and complete them in parallel rounds (`max_rounds`). Peer messaging is not
+included yet.
+
+```python
+from pydantic_ai import Agent
+from pydantic_team import CollaborativeTeam
+
+researcher = Agent('openai:gpt-4o', name='researcher')
+writer = Agent('openai:gpt-4o', name='writer')
+
+team = CollaborativeTeam(
+    leader_model='openai:gpt-4o',
+    members=[researcher, writer],
+    max_rounds=3,
+)
+result = await team.run('Draft a short brief on agent teams')
+```
 
 ### Result type
 
