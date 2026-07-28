@@ -45,11 +45,11 @@ import asyncio
 from pydantic_ai import Agent
 from pydantic_team import HierarchicalTeam
 
-researcher = Agent('openai:gpt-4o', name='researcher', instructions='Research briefly.')
-writer = Agent('openai:gpt-4o', name='writer', instructions='Write a short summary.')
+researcher = Agent('openai:gpt-4.1', name='researcher', instructions='Research briefly.')
+writer = Agent('openai:gpt-4.1', name='writer', instructions='Write a short summary.')
 
 team = HierarchicalTeam(
-    leader_model='openai:gpt-4o',
+    leader_model='openai:gpt-4.1',
     members=[researcher, writer],
 )
 
@@ -62,3 +62,43 @@ asyncio.run(main())
 ```
 
 See [Hierarchical teams](hierarchical.md) for nested teams, usage details, and testing.
+
+## Observability
+
+Team orchestration emits OpenTelemetry spans when you opt in with
+[`instrument_pydantic_team`][pydantic_team.instrument_pydantic_team]. Pair it with
+Logfire (or any OTel backend) and pydantic-ai instrumentation:
+
+```python
+import logfire
+from pydantic_team import instrument_pydantic_team
+
+logfire.configure(send_to_logfire='if-token-present')  # local unless LOGFIRE_TOKEN
+logfire.instrument_pydantic_ai()  # agent + tool spans
+instrument_pydantic_team()        # team orchestration spans
+```
+
+Span names include `hierarchical.run` / `hierarchical.delegate` and
+`collaborative.run` / `.seed` / `.round` / `.synthesize`. Board tool calls are
+covered by `instrument_pydantic_ai()` — they are not duplicated as team spans.
+
+## Examples
+
+Live-model try-it scripts in the repo (default model `openai:gpt-5.6-luna`;
+optional `PYDANTIC_TEAM_MODEL`). Scripts load `examples/.env` via `python-dotenv`
+(e.g. `OPENAI_API_KEY` for `openai:` models) and enable Logfire + both
+`instrument_*` calls.
+
+The library depends on [`pydantic-ai-slim`](https://ai.pydantic.dev/install/)
+without provider SDKs. Sync the `examples` group to install
+`pydantic-ai-slim[openai]`, `logfire`, and `python-dotenv`.
+
+- [`examples/hierarchical_basic.py`](https://github.com/etiqa/pydantic-team/blob/main/examples/hierarchical_basic.py)
+- [`examples/collaborative_basic.py`](https://github.com/etiqa/pydantic-team/blob/main/examples/collaborative_basic.py)
+
+```bash
+# examples/.env with OPENAI_API_KEY is loaded automatically
+uv sync --group examples
+uv run examples/hierarchical_basic.py
+uv run examples/collaborative_basic.py
+```

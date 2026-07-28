@@ -14,6 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CollaborativeTeam`: leader seeds the board; members claim/complete tasks in
   parallel rounds (`max_rounds`); aggregated `RunUsage`; no peer DM yet.
 - Docs page for collaborative teams.
+- `instrument_pydantic_team()` / `is_instrumented()`: opt-in OpenTelemetry spans
+  for team orchestration (`hierarchical.*`, `collaborative.*`), backend-agnostic
+  via `opentelemetry-api` (works with Logfire after `logfire.configure()`).
+- Examples: Logfire + `instrument_pydantic_ai()` + `instrument_pydantic_team()`,
+  `python-dotenv` for `examples/.env`.
+
+### Changed
+
+- `CollaborativeTeam` defaults to **assign-by-role**: the leader must assign each
+  task to a named teammate; member ticks receive per-agent prompts to complete
+  only their assigned work (no cross-role claim monopolies).
+
+### Removed
+
+- Stdlib `pydantic_team` logger and interaction `logger.info` calls (replaced by
+  OTel team spans).
 
 ## [0.1.0] - 2026-07-28
 

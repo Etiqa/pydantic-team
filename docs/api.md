@@ -13,6 +13,8 @@ Public exports from [`pydantic_team`][pydantic_team].
         - Task
         - TaskStatus
         - BoardDeps
+        - instrument_pydantic_team
+        - is_instrumented
         - __version__
 
 ## Base types
