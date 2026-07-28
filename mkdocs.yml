@@ -1,0 +1,57 @@
+site_name: pydantic-team
+site_description: Type-safe team orchestration for pydantic-ai Agents
+site_url: https://github.com/etiqa/pydantic-team
+
+repo_name: etiqa/pydantic-team
+repo_url: https://github.com/etiqa/pydantic-team
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - navigation.sections
+    - search.suggest
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            merge_init_into_class: true
+
+watch:
+  - pydantic_team
+
+nav:
+  - Home: index.md
+  - Hierarchical teams: hierarchical.md
+  - API reference: api.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - tables
+  - toc:
+      permalink: true

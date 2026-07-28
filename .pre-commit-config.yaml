@@ -1,0 +1,27 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+
+  - repo: local
+    hooks:
+      - id: format
+        name: Format
+        entry: make
+        args: [format]
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: lint
+        name: Lint
+        entry: make
+        args: [lint]
+        language: system
+        types: [python]
+        pass_filenames: false
