@@ -25,10 +25,11 @@ htmlcov/
 .vscode/
 .DS_Store
 
-# Env
+# Env (any directory, including examples/.env)
 .env
 .env.*
 !.env.example
+examples/.env
 
 # Docs build
 site/

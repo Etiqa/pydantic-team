@@ -2,7 +2,10 @@
 
 from __future__ import annotations as _annotations
 
+from pydantic_team._instrumentation import instrument_pydantic_team, is_instrumented
 from pydantic_team.base import BaseTeam, TeamResult
+from pydantic_team.board import Task, TaskBoard, TaskStatus
+from pydantic_team.collaborative import BoardDeps, CollaborativeTeam
 from pydantic_team.hierarchical import HierarchicalTeam
 
 __version__ = '0.1.0'
@@ -10,6 +13,13 @@ __version__ = '0.1.0'
 __all__ = (
     '__version__',
     'BaseTeam',
+    'BoardDeps',
+    'CollaborativeTeam',
     'HierarchicalTeam',
+    'Task',
+    'TaskBoard',
+    'TaskStatus',
     'TeamResult',
+    'instrument_pydantic_team',
+    'is_instrumented',
 )

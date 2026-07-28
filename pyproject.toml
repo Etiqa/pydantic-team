@@ -28,8 +28,9 @@ classifiers = [
     "Framework :: Pydantic :: 2",
 ]
 dependencies = [
-    "pydantic>=2",
-    "pydantic-ai>=1.0",
+    "opentelemetry-api>=1.20",
+    "pydantic>=2.13.4",
+    "pydantic-ai-slim>=2.19.0",
     "typing-extensions>=4.12",
 ]
 
@@ -40,6 +41,7 @@ Source = "https://github.com/etiqa/pydantic-team"
 [dependency-groups]
 dev = [
     "coverage>=7.6",
+    "opentelemetry-sdk>=1.20",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
@@ -53,6 +55,11 @@ docs = [
     "mkdocs>=1.6",
     "mkdocs-material>=9.5",
     "mkdocstrings[python]>=0.27",
+]
+examples = [
+    "logfire>=3.0",
+    "pydantic-ai-slim[openai]>=2.19.0",
+    "python-dotenv>=1.0",
 ]
 
 [tool.uv]

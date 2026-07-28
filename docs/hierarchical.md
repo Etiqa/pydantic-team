@@ -21,20 +21,20 @@ from pydantic_ai import Agent
 from pydantic_team import HierarchicalTeam
 
 researcher = Agent(
-    'openai:gpt-4o',
+    'openai:gpt-4.1',
     name='researcher',
     description='Collect concise research notes',
     instructions='Research the topic and return notes.',
 )
 writer = Agent(
-    'openai:gpt-4o',
+    'openai:gpt-4.1',
     name='writer',
     description='Turn notes into prose',
     instructions='Write a short article from the notes.',
 )
 
 team = HierarchicalTeam(
-    leader_model='openai:gpt-4o',
+    leader_model='openai:gpt-4.1',
     members=[researcher, writer],
     system_prompt_override=(
         'Delegate to researcher or writer based on the task, '
@@ -73,6 +73,10 @@ usage = RunUsage()
 result = await team.run('task', usage=usage)
 ```
 
+Each member-tool call is wrapped in a `hierarchical.delegate` OpenTelemetry span
+when [`instrument_pydantic_team`][pydantic_team.instrument_pydantic_team] is enabled
+(see [Observability](index.md#observability)).
+
 ## Nested teams
 
 Members may be agents **or** other [`BaseTeam`][pydantic_team.base.BaseTeam] instances
@@ -82,12 +86,12 @@ leader gets a clear tool id.
 ```python
 germanic = HierarchicalTeam(
     name='germanic_team',
-    leader_model='openai:gpt-4o',
+    leader_model='openai:gpt-4.1',
     members=[german_agent, dutch_agent],
 )
 
 language_team = HierarchicalTeam(
-    leader_model='openai:gpt-4o',
+    leader_model='openai:gpt-4.1',
     members=[english_agent, chinese_agent, germanic],
 )
 ```
