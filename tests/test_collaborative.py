@@ -11,10 +11,14 @@ from pydantic_team import CollaborativeTeam, TeamResult
 from pydantic_team.board import TaskBoard
 from pydantic_team.collaborative import (
     BoardDeps,
+    add_task,
     assign_task,
     claim_task,
     complete_task,
+    default_leader_instructions,
     list_tasks,
+    member_work_prompt,
+    seed_user_prompt,
 )
 
 
@@ -157,8 +161,10 @@ async def test_board_tools_error_and_success_paths() -> None:
 
     assert await list_tasks(ctx, None) == 'No tasks'
     assert 'Error: invalid status' in await list_tasks(ctx, 'nope')
+    created_msg = await add_task(ctx, 'Research notes')
+    assert 'Created' in created_msg
 
-    created = await board.add_task('T')
+    created = (await board.list_tasks())[0]
     listed = await list_tasks(ctx, 'open')
     assert created.id in listed
 
@@ -177,3 +183,54 @@ async def test_board_tools_error_and_success_paths() -> None:
 async def test_board_deps_type_error() -> None:
     with pytest.raises(TypeError, match='BoardDeps'):
         await list_tasks(cast(RunContext[object], _FakeCtx(deps='nope')), None)
+
+
+def test_default_leader_instructions_require_assign_by_role() -> None:
+    text = default_leader_instructions(['researcher', 'writer'])
+    assert 'researcher' in text
+    assert 'writer' in text
+    assert 'assign_task' in text
+    assert 'Do not leave tasks open without an assignee' in text
+
+
+def test_seed_user_prompt_includes_roster() -> None:
+    text = seed_user_prompt('Ship it', ['researcher', 'writer'])
+    assert 'Ship it' in text
+    assert 'researcher' in text
+    assert 'assign_task' in text
+
+
+async def test_member_work_prompt_lists_only_own_assignments() -> None:
+    board = TaskBoard()
+    research = await board.add_task('Research notes')
+    writing = await board.add_task('Draft copy')
+    await board.assign(research.id, 'researcher')
+    await board.assign(writing.id, 'writer')
+
+    researcher_prompt = member_work_prompt('Brief', 'researcher', board)
+    assert "Your agent id is 'researcher'" in researcher_prompt
+    assert 'do not claim tasks assigned to others' in researcher_prompt
+    assert research.id in researcher_prompt
+    assert 'Tasks assigned to you:\n- task-1' in researcher_prompt
+
+    writer_prompt = member_work_prompt('Brief', 'writer', board)
+    assert writing.id in writer_prompt
+    assert "Your agent id is 'writer'" in writer_prompt
+
+
+async def test_member_work_prompt_none_when_unassigned() -> None:
+    board = TaskBoard()
+    await board.add_task('Open work')
+    prompt = member_work_prompt('Goal', 'researcher', board)
+    assert 'Tasks assigned to you:\n(none)' in prompt
+
+
+async def test_collaborative_from_leader_model_includes_member_roster() -> None:
+    researcher = Agent(TestModel(), name='researcher')
+    writer = Agent(TestModel(), name='writer')
+    team = CollaborativeTeam(leader_model='test', members=[researcher, writer], max_rounds=1)
+    assert 'researcher' in team.member_ids
+    assert 'writer' in team.member_ids
+    instructions = default_leader_instructions(list(team.member_ids))
+    assert 'researcher' in instructions
+    assert 'assign_task' in instructions

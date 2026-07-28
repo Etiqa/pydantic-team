@@ -7,6 +7,7 @@ from collections.abc import Callable, Coroutine, Sequence
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.usage import RunUsage
 
+from pydantic_team._instrumentation import snippet, team_span
 from pydantic_team._utils import (
     TeamMember,
     member_tool_description,
@@ -90,11 +91,12 @@ class HierarchicalTeam(BaseTeam[object]):
         return self._members
 
     async def run(self, user_prompt: str, *, usage: RunUsage | None = None) -> TeamResult[object]:
-        if usage is None:
-            result = await self._leader.run(user_prompt)
-        else:
-            result = await self._leader.run(user_prompt, usage=usage)
-        return TeamResult(data=result.output, usage=result.usage)
+        with team_span('hierarchical.run', prompt=snippet(user_prompt)):
+            if usage is None:
+                result = await self._leader.run(user_prompt)
+            else:
+                result = await self._leader.run(user_prompt, usage=usage)
+            return TeamResult(data=result.output, usage=result.usage)
 
     def _register_member_tools(self) -> None:
         for index, member in enumerate(self._members):
@@ -109,8 +111,14 @@ class HierarchicalTeam(BaseTeam[object]):
         description: str,
     ) -> DelegateTool:
         async def delegate(ctx: RunContext[object], request: str) -> str:
-            output = await run_member(member, request, usage=ctx.usage)
-            return stringify_output(output)
+            with team_span(
+                'hierarchical.delegate',
+                member=tool_name,
+                request=snippet(request),
+            ):
+                output = await run_member(member, request, usage=ctx.usage)
+                text = stringify_output(output)
+                return text
 
         delegate.__name__ = tool_name
         delegate.__qualname__ = tool_name

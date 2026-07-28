@@ -2,6 +2,7 @@
 
 from __future__ import annotations as _annotations
 
+from pydantic_team._instrumentation import instrument_pydantic_team, is_instrumented
 from pydantic_team.base import BaseTeam, TeamResult
 from pydantic_team.board import Task, TaskBoard, TaskStatus
 from pydantic_team.collaborative import BoardDeps, CollaborativeTeam
@@ -19,4 +20,6 @@ __all__ = (
     'TaskBoard',
     'TaskStatus',
     'TeamResult',
+    'instrument_pydantic_team',
+    'is_instrumented',
 )
