@@ -4,29 +4,28 @@ Type-safe team orchestration for [`pydantic-ai`](https://ai.pydantic.dev) Agents
 
 ## What this library is
 
-v1 provides **[`HierarchicalTeam`](hierarchical.md)** — a leader agent that delegates to
-specialists (or nested teams) via tools, preserving token/usage tracking through
-`usage=ctx.usage`.
+v1 provides:
 
-This matches:
-
-- Agno's **coordinate** team mode
-- pydantic-ai [agent delegation](https://ai.pydantic.dev/multi-agent-applications/)
+- **[`HierarchicalTeam`](hierarchical.md)** — leader delegates to specialists (or nested
+  teams) via tools (`usage=ctx.usage`), matching Agno **coordinate** / pydantic-ai
+  [agent delegation](https://ai.pydantic.dev/multi-agent-applications/)
+- **[`CollaborativeTeam`](collaborative.md)** — shared [`TaskBoard`](api.md) with
+  leader create/assign and parallel member claim/complete
 
 ## What this library is not
 
-v1 does **not** implement the “Agent Teams” paradigm with a shared task list, peer-to-peer
-messaging between teammates, or autonomous claim/assign loops. That would be a separate
-orchestration model.
+Collaborative mode does **not** yet include peer-to-peer messaging between teammates
+or a fully autonomous multi-agent “inbox” loop beyond board claim/assign rounds.
 
 For **sequential**, branching, or stateful pipelines, use
-[`pydantic-graph`](https://ai.pydantic.dev/graph/) instead of inventing another team type.
+[`pydantic-graph`](https://ai.pydantic.dev/graph/) instead of inventing another workflow type.
 
 | Need | Use |
 |------|-----|
 | Leader delegates and synthesizes | [`HierarchicalTeam`](hierarchical.md) |
+| Shared task board + parallel claim | [`CollaborativeTeam`](collaborative.md) |
 | Ordered / branching / stateful flow | [pydantic-graph](https://ai.pydantic.dev/graph/) |
-| Shared task board + peer messages | Not in v1 |
+| Peer DM between teammates | Not yet |
 
 ## Install
 

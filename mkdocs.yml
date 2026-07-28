@@ -44,6 +44,7 @@ watch:
 nav:
   - Home: index.md
   - Hierarchical teams: hierarchical.md
+  - Collaborative teams: collaborative.md
   - API reference: api.md
 
 markdown_extensions:

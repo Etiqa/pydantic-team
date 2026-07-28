@@ -8,6 +8,11 @@ Public exports from [`pydantic_team`][pydantic_team].
         - BaseTeam
         - TeamResult
         - HierarchicalTeam
+        - CollaborativeTeam
+        - TaskBoard
+        - Task
+        - TaskStatus
+        - BoardDeps
         - __version__
 
 ## Base types
@@ -19,3 +24,15 @@ Public exports from [`pydantic_team`][pydantic_team].
 ## Hierarchical team
 
 ::: pydantic_team.hierarchical.HierarchicalTeam
+
+## Collaborative team / board
+
+::: pydantic_team.board.TaskStatus
+
+::: pydantic_team.board.Task
+
+::: pydantic_team.board.TaskBoard
+
+::: pydantic_team.collaborative.BoardDeps
+
+::: pydantic_team.collaborative.CollaborativeTeam
