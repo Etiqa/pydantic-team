@@ -1,5 +1,9 @@
 # pydantic-team
 
+[![CI](https://github.com/etiqa/pydantic-team/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/etiqa/pydantic-team/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pydantic-team)](https://pypi.org/project/pydantic-team/)
+[![Python](https://img.shields.io/pypi/pyversions/pydantic-team)](https://pypi.org/project/pydantic-team/)
+
 Type-safe team orchestration for [`pydantic-ai`](https://ai.pydantic.dev) Agents.
 
 v1 focuses on **hierarchical** (leader + specialists) teams — the same idea as Agno's
@@ -22,7 +26,9 @@ Requires Python 3.10+.
 
 ## Documentation
 
-Full guides and API reference (MkDocs + mkdocstrings):
+Published docs: [etiqa.github.io/pydantic-team](https://etiqa.github.io/pydantic-team/)
+
+Local build (MkDocs + mkdocstrings):
 
 ```bash
 uv sync --group docs
@@ -106,6 +112,20 @@ make docs-serve
 ```
 
 Unit tests use pydantic-ai `TestModel` only — no live LLM calls.
+
+## Release
+
+1. Bump `version` in `pyproject.toml` and update `CHANGELOG.md`.
+2. Merge to `main` and wait for CI (`check`) to pass.
+3. Tag and push (tag must match the package version, e.g. `0.1.1` → `v0.1.1`):
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+On a `v*` tag, CI publishes to PyPI (Trusted Publisher / environment `release`) and
+deploys docs to [GitHub Pages](https://etiqa.github.io/pydantic-team/).
 
 ## License
 

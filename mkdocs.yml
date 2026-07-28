@@ -1,6 +1,6 @@
 site_name: pydantic-team
 site_description: Type-safe team orchestration for pydantic-ai Agents
-site_url: https://github.com/etiqa/pydantic-team
+site_url: https://etiqa.github.io/pydantic-team/
 
 repo_name: etiqa/pydantic-team
 repo_url: https://github.com/etiqa/pydantic-team
