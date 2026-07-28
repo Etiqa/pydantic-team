@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-28
+
 ### Added
 
 - `TaskBoard`, `Task`, and `TaskStatus`: in-process shared task list with atomic
@@ -47,5 +49,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MkDocs documentation (guides + API reference) and a full test suite with
   100% coverage using pydantic-ai `TestModel` (no live LLM calls).
 
-[Unreleased]: https://github.com/etiqa/pydantic-team/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/etiqa/pydantic-team/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/etiqa/pydantic-team/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/etiqa/pydantic-team/releases/tag/v0.1.0

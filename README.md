@@ -165,16 +165,6 @@ make docs-serve
 
 Unit tests use pydantic-ai `TestModel` only — no live LLM calls.
 
-## Release
-
-1. Bump `version` in `pyproject.toml` and update `CHANGELOG.md`.
-2. Merge to `main` and wait for CI (`check`) to pass.
-3. Tag and push (tag must match the package version, e.g. `0.1.1` → `v0.1.1`):
-
-```bash
-git tag v0.1.1
-git push origin v0.1.1
-```
 
 On a `v*` tag, CI publishes to PyPI (Trusted Publisher / environment `release`) and
 deploys docs to [GitHub Pages](https://etiqa.github.io/pydantic-team/).
