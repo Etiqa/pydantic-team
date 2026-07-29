@@ -10,7 +10,7 @@ from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
-from pydantic_team import CollaborativeTeam, TeamResult
+from pydantic_team import CollaborativeTeam, TeamResult, collaborative as collaborative_mod
 from pydantic_team.board import TaskBoard, TaskStatus
 from pydantic_team.collaborative import (
     BoardDeps,
@@ -25,6 +25,7 @@ from pydantic_team.collaborative import (
     replan_user_prompt,
     seed_user_prompt,
 )
+from pydantic_team.events import RunEnded, TasksScheduled
 
 
 @dataclass
@@ -308,11 +309,54 @@ async def test_streaming_empty_seed_returns_leader_output() -> None:
         max_rounds=1,
         dispatch_mode='streaming',
     )
+    events: list[object] = []
     with leader.override(model=TestModel(call_tools=[], custom_output_text='solo-stream')):
         with worker.override(model=TestModel(custom_output_text='unused')):
-            result = await team.run('Nothing to split')
-    assert result.data == 'solo-stream'
+            async with team.iter('Nothing to split') as run:
+                async for event in run:
+                    events.append(event)
+                assert run.result is not None
+                assert run.result.data == 'solo-stream'
+                assert run.board.is_complete()
+                assert not run.board.snapshot()
     assert team.dispatch_mode == 'streaming'
+    assert not any(isinstance(e, TasksScheduled) and any(t.kind == 'synthesize' for t in e.tasks) for e in events)
+    assert isinstance(events[-1], RunEnded)
+    assert events[-1].result.data == 'solo-stream'
+
+
+async def test_streaming_dispatch_early_return_emits_run_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Force early TeamResult from dispatch to cover _drive_streaming early-exit path."""
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=1,
+        dispatch_mode='streaming',
+    )
+    early_result: TeamResult[object] = TeamResult(data='forced-early', usage=RunUsage())
+
+    async def _force_early(_self: object) -> TeamResult[object]:
+        return early_result
+
+    streaming_dispatch = getattr(collaborative_mod, '_StreamingDispatch')
+    monkeypatch.setattr(streaming_dispatch, 'run', _force_early)
+
+    events: list[object] = []
+    with leader.override(model=TestModel(custom_output_text='should-not-synthesize')):
+        with worker.override(model=TestModel(custom_output_text='unused')):
+            async with team.iter('Forced early exit') as run:
+                async for event in run:
+                    events.append(event)
+                assert run.result is not None
+                assert run.result.data == 'forced-early'
+
+    assert not any(isinstance(e, TasksScheduled) and any(t.kind == 'synthesize' for t in e.tasks) for e in events)
+    assert isinstance(events[-1], RunEnded)
+    assert events[-1].result.data == 'forced-early'
 
 
 @dataclass

@@ -251,6 +251,7 @@ async def test_collaborative_streaming_dispatch_spans() -> None:
     assert 'collaborative.dispatch' in names
     assert 'collaborative.seed' in names
     assert 'collaborative.round' not in names
+    assert 'collaborative.synthesize' not in names
 
 
 async def test_collaborative_replan_runs_when_board_incomplete() -> None:
