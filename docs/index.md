@@ -17,7 +17,9 @@ v1 provides:
 
 Collaborative mode does **not** yet include a fully autonomous multi-agent “inbox”
 loop beyond board claim/assign rounds and peer `send_message` / `list_messages`.
-Members cannot create sub-tasks; there is no per-task approve/reject gate yet.
+Members cannot create dependency-linked tasks; there is no per-task approve/reject
+gate yet; Collaborative members must be agents (not nested teams). See the
+[Roadmap](roadmap.md) for planned directions.
 
 For **sequential**, branching, or stateful pipelines, use
 [`pydantic-graph`](https://ai.pydantic.dev/graph/) instead of inventing another workflow type.

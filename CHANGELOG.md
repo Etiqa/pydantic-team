@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Docs roadmap page ([`docs/roadmap.md`](docs/roadmap.md)): Done / Next / Later /
+  Non-goals, linked from Home, Collaborative guide, README, and MkDocs nav.
+
 ## [0.3.0] - 2026-07-29
 
 ### Added

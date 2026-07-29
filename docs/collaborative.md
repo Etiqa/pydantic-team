@@ -18,8 +18,9 @@ synthesizes), collaborative mode:
 
 Members may **message each other directly** (`send_message` / `list_messages`) without
 routing through the leader. The leader can **observe** messages with `list_messages`
-during seed/replan. Members cannot create sub-tasks in this version. There is no
-per-task approve/reject gate yet.
+during seed/replan. Members cannot create dependency-linked tasks in this version.
+There is no per-task approve/reject gate yet; nested teams are not supported as
+members. See the [Roadmap](roadmap.md) for planned directions.
 
 ```mermaid
 flowchart TD
@@ -102,7 +103,7 @@ print(result.usage)
   (default `0` = seed → work → synthesize only)
 - `max_assignments_per_tick`: optional cap on how many incomplete assignments are listed
   for a member in one tick (forces leftover work into later ticks / replan)
-- Members must be agents (nested teams are not supported in this slice)
+- Members must be agents (nested teams are not supported in this slice; see [Roadmap](roadmap.md))
 - Pass `usage=` as a team-level aggregate: each seed / replan / synthesize / member
   tick is an isolated `agent.run` with its own usage budget (so the default
   `request_limit` applies per cycle), then folded into the aggregate

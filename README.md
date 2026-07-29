@@ -34,6 +34,8 @@ Requires Python 3.10+.
 
 Published docs: [etiqa.github.io/pydantic-team](https://etiqa.github.io/pydantic-team/)
 
+Roadmap (planned directions, non-binding): [`docs/roadmap.md`](docs/roadmap.md)
+
 Local build (MkDocs + mkdocstrings):
 
 ```bash
