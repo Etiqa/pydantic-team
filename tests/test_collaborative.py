@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import cast
 
 import pytest
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
 
 from pydantic_team import CollaborativeTeam, TeamResult
-from pydantic_team.board import TaskBoard
+from pydantic_team.board import TaskBoard, TaskStatus
 from pydantic_team.collaborative import (
     BoardDeps,
+    DispatchMode,
     add_task,
     assign_task,
     claim_task,
@@ -18,6 +22,7 @@ from pydantic_team.collaborative import (
     default_leader_instructions,
     list_tasks,
     member_work_prompt,
+    replan_user_prompt,
     seed_user_prompt,
 )
 
@@ -55,6 +60,23 @@ def test_collaborative_requires_positive_rounds() -> None:
         CollaborativeTeam(leader_model='test', members=[member], max_rounds=0)
 
 
+def test_collaborative_requires_non_negative_replans() -> None:
+    member = Agent(TestModel(), name='worker')
+    with pytest.raises(ValueError, match='max_replans'):
+        CollaborativeTeam(leader_model='test', members=[member], max_replans=-1)
+
+
+def test_replan_user_prompt_includes_goal_roster_and_board() -> None:
+    board = TaskBoard()
+    text = replan_user_prompt('Ship it', ['researcher', 'writer'], board)
+    assert 'Ship it' in text
+    assert 'researcher' in text
+    assert 'writer' in text
+    assert 'add_task' in text
+    assert 'assign_task' in text
+    assert '(empty)' in text
+
+
 async def test_collaborative_run_returns_team_result() -> None:
     leader = Agent(TestModel(), name='leader', instructions='Lead the board.')
     worker = Agent(TestModel(), name='worker', instructions='Claim and complete tasks.')
@@ -84,7 +106,8 @@ async def test_collaborative_no_tasks_returns_lead_output() -> None:
 
 
 async def test_collaborative_leader_tools_create_tasks() -> None:
-    leader_model = TestModel()
+    """Seed/replan expose board tools; empty-board early exit avoids toolless synthesize."""
+    leader_model = TestModel(call_tools=[], custom_output_text='solo-lead')
     leader = Agent(leader_model, name='leader')
     worker = Agent(TestModel(), name='worker')
     team = CollaborativeTeam(leader_agent=leader, members=[worker], max_rounds=1)
@@ -225,6 +248,29 @@ async def test_member_work_prompt_none_when_unassigned() -> None:
     assert 'Tasks assigned to you:\n(none)' in prompt
 
 
+async def test_member_work_prompt_max_assignments_caps_list() -> None:
+    board = TaskBoard()
+    first = await board.add_task('First')
+    second = await board.add_task('Second')
+    await board.assign(first.id, 'researcher')
+    await board.assign(second.id, 'researcher')
+    prompt = member_work_prompt('Goal', 'researcher', board, max_assignments=1)
+    assert first.id in prompt
+    assert second.id not in prompt.split('Tasks assigned to you:')[1].split('Full board:')[0]
+
+
+def test_collaborative_rejects_invalid_assignments_per_tick() -> None:
+    member = Agent(TestModel(), name='worker')
+    with pytest.raises(ValueError, match='max_assignments_per_tick'):
+        CollaborativeTeam(leader_model='test', members=[member], max_assignments_per_tick=0)
+
+
+def test_collaborative_rejects_invalid_dispatch_mode() -> None:
+    member = Agent(TestModel(), name='worker')
+    with pytest.raises(ValueError, match='dispatch_mode'):
+        CollaborativeTeam(leader_model='test', members=[member], dispatch_mode=cast(DispatchMode, 'nope'))
+
+
 async def test_collaborative_from_leader_model_includes_member_roster() -> None:
     researcher = Agent(TestModel(), name='researcher')
     writer = Agent(TestModel(), name='writer')
@@ -234,3 +280,411 @@ async def test_collaborative_from_leader_model_includes_member_roster() -> None:
     instructions = default_leader_instructions(list(team.member_ids))
     assert 'researcher' in instructions
     assert 'assign_task' in instructions
+
+
+async def test_collaborative_member_swallows_unexpected_model_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(leader_agent=leader, members=[worker], max_rounds=1)
+
+    async def _boom(*_args: object, **_kwargs: object) -> object:
+        raise UnexpectedModelBehavior('Exceeded maximum output retries (1)')
+
+    monkeypatch.setattr(worker, 'run', _boom)
+
+    with leader.override(model=TestModel(custom_output_text='final')):
+        result = await team.run('Ship it')
+    assert result.data == 'final'
+
+
+async def test_streaming_empty_seed_returns_leader_output() -> None:
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=1,
+        dispatch_mode='streaming',
+    )
+    with leader.override(model=TestModel(call_tools=[], custom_output_text='solo-stream')):
+        with worker.override(model=TestModel(custom_output_text='unused')):
+            result = await team.run('Nothing to split')
+    assert result.data == 'solo-stream'
+    assert team.dispatch_mode == 'streaming'
+
+
+@dataclass
+class _FakeRunResult:
+    output: object
+
+
+def _deps_from_kwargs(kwargs: dict[str, object]) -> BoardDeps | None:
+    deps = kwargs.get('deps')
+    return deps if isinstance(deps, BoardDeps) else None
+
+
+def _usage_from_kwargs(kwargs: dict[str, object]) -> RunUsage | None:
+    usage = kwargs.get('usage')
+    return usage if isinstance(usage, RunUsage) else None
+
+
+async def test_streaming_member_starts_during_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    member_started = asyncio.Event()
+    overlap_confirmed = asyncio.Event()
+
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=2,
+        dispatch_mode='streaming',
+    )
+
+    leader_calls = 0
+
+    async def _seed_assigns_then_waits(user_prompt: str, **kwargs: object) -> _FakeRunResult:
+        nonlocal leader_calls
+        leader_calls += 1
+        deps = _deps_from_kwargs(kwargs)
+        if leader_calls == 1 and deps is not None:
+            task = await deps.board.add_task('Overlapping work')
+            await deps.board.assign(task.id, 'worker')
+            await asyncio.wait_for(member_started.wait(), timeout=2)
+            overlap_confirmed.set()
+            return _FakeRunResult(output='seeded')
+        result = await Agent.run(
+            leader,
+            user_prompt,
+            deps=deps,
+            usage=_usage_from_kwargs(kwargs),
+        )
+        return _FakeRunResult(output=result.output)
+
+    monkeypatch.setattr(leader, 'run', _seed_assigns_then_waits)
+
+    async def _worker_run(user_prompt: str, **kwargs: object) -> object:
+        member_started.set()
+        result = await Agent.run(
+            worker,
+            user_prompt,
+            deps=_deps_from_kwargs(kwargs),
+            usage=_usage_from_kwargs(kwargs),
+        )
+        return result
+
+    monkeypatch.setattr(worker, 'run', _worker_run)
+
+    with worker.override(model=TestModel(custom_output_text='worked')):
+        result = await team.run('Ship overlapping work')
+
+    assert overlap_confirmed.is_set()
+    assert result.data is not None
+
+
+async def test_streaming_one_inflight_tick_per_member(monkeypatch: pytest.MonkeyPatch) -> None:
+    concurrent = 0
+    max_concurrent = 0
+
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=3,
+        max_assignments_per_tick=1,
+        dispatch_mode='streaming',
+    )
+
+    leader_calls = 0
+
+    async def _seed_two_tasks(user_prompt: str, **kwargs: object) -> _FakeRunResult:
+        nonlocal leader_calls
+        leader_calls += 1
+        deps = _deps_from_kwargs(kwargs)
+        if leader_calls == 1 and deps is not None:
+            first = await deps.board.add_task('First')
+            second = await deps.board.add_task('Second')
+            await deps.board.assign(first.id, 'worker')
+            await deps.board.assign(second.id, 'worker')
+            return _FakeRunResult(output='seeded')
+        result = await Agent.run(
+            leader,
+            user_prompt,
+            deps=deps,
+            usage=_usage_from_kwargs(kwargs),
+        )
+        return _FakeRunResult(output=result.output)
+
+    monkeypatch.setattr(leader, 'run', _seed_two_tasks)
+
+    async def _worker_run(user_prompt: str, **kwargs: object) -> object:
+        nonlocal concurrent, max_concurrent
+        concurrent += 1
+        max_concurrent = max(max_concurrent, concurrent)
+        await asyncio.sleep(0.05)
+        try:
+            return await Agent.run(
+                worker,
+                user_prompt,
+                deps=_deps_from_kwargs(kwargs),
+                usage=_usage_from_kwargs(kwargs),
+            )
+        finally:
+            concurrent -= 1
+
+    monkeypatch.setattr(worker, 'run', _worker_run)
+
+    with worker.override(model=TestModel(custom_output_text='worked')):
+        await team.run('Many tasks for one worker')
+
+    assert max_concurrent == 1
+
+
+async def test_streaming_swallows_unexpected_model_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=1,
+        dispatch_mode='streaming',
+    )
+
+    leader_calls = 0
+
+    async def _seed_one_task(user_prompt: str, **kwargs: object) -> _FakeRunResult:
+        nonlocal leader_calls
+        leader_calls += 1
+        deps = _deps_from_kwargs(kwargs)
+        if leader_calls == 1 and deps is not None:
+            task = await deps.board.add_task('Boom')
+            await deps.board.assign(task.id, 'worker')
+            return _FakeRunResult(output='seeded')
+        result = await Agent.run(
+            leader,
+            user_prompt,
+            deps=deps,
+            usage=_usage_from_kwargs(kwargs),
+        )
+        return _FakeRunResult(output=result.output)
+
+    monkeypatch.setattr(leader, 'run', _seed_one_task)
+
+    async def _boom(user_prompt: str, **_kwargs: object) -> object:
+        raise UnexpectedModelBehavior('Exceeded maximum output retries (1)')
+
+    monkeypatch.setattr(worker, 'run', _boom)
+
+    result = await team.run('Ship it')
+    assert result.data is not None
+
+
+async def test_streaming_replan_when_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Incomplete board after capped ticks triggers a leader replan."""
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=1,
+        max_replans=1,
+        max_assignments_per_tick=1,
+        dispatch_mode='streaming',
+    )
+
+    leader_calls = 0
+    saw_replan = False
+
+    async def _seed_then_real(user_prompt: str, **kwargs: object) -> _FakeRunResult:
+        nonlocal leader_calls, saw_replan
+        leader_calls += 1
+        deps = _deps_from_kwargs(kwargs)
+        if 'Review the board after member work' in user_prompt:
+            saw_replan = True
+        if leader_calls == 1 and deps is not None:
+            task = await deps.board.add_task('Unfinished')
+            await deps.board.assign(task.id, 'worker')
+            return _FakeRunResult(output='seeded')
+        result = await Agent.run(
+            leader,
+            user_prompt,
+            deps=deps,
+            usage=_usage_from_kwargs(kwargs),
+        )
+        return _FakeRunResult(output=result.output)
+
+    monkeypatch.setattr(leader, 'run', _seed_then_real)
+
+    async def _idle_worker(user_prompt: str, **_kwargs: object) -> object:
+        return None
+
+    monkeypatch.setattr(worker, 'run', _idle_worker)
+
+    with leader.override(model=TestModel(custom_output_text='synth')):
+        result = await team.run('Need replan')
+
+    assert saw_replan
+    assert leader_calls >= 3  # seed + replan + synthesize
+    assert result.data == 'synth'
+
+
+async def test_streaming_completed_board_synthesizes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When members finish all tasks, streaming drains then synthesizes."""
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=2,
+        dispatch_mode='streaming',
+    )
+
+    leader_calls = 0
+
+    async def _seed_one_task(user_prompt: str, **kwargs: object) -> _FakeRunResult:
+        nonlocal leader_calls
+        leader_calls += 1
+        deps = _deps_from_kwargs(kwargs)
+        if leader_calls == 1 and deps is not None:
+            task = await deps.board.add_task('Do it')
+            await deps.board.assign(task.id, 'worker')
+            return _FakeRunResult(output='seeded')
+        result = await Agent.run(
+            leader,
+            user_prompt,
+            deps=deps,
+            usage=_usage_from_kwargs(kwargs),
+        )
+        return _FakeRunResult(output=result.output)
+
+    monkeypatch.setattr(leader, 'run', _seed_one_task)
+
+    async def _complete_assigned(user_prompt: str, **kwargs: object) -> object:
+        deps = _deps_from_kwargs(kwargs)
+        assert deps is not None
+        for task in deps.board.snapshot():
+            if task.assignee == 'worker' and task.status is not TaskStatus.DONE:
+                await deps.board.complete(task.id, result='done', agent_id='worker')
+        return _FakeRunResult(output='worked')
+
+    monkeypatch.setattr(worker, 'run', _complete_assigned)
+
+    with leader.override(model=TestModel(custom_output_text='final-synth')):
+        result = await team.run('Finish work')
+
+    assert result.data == 'final-synth'
+    assert leader_calls >= 2  # seed + synthesize
+
+
+async def test_per_cycle_usage_isolation_with_prefilled_aggregate() -> None:
+    """Each agent cycle uses a fresh RunUsage; aggregate at the limit must not block seed."""
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(leader_agent=leader, members=[worker], max_rounds=1)
+    usage = RunUsage()
+    usage.requests = 50
+
+    with leader.override(model=TestModel(call_tools=[], custom_output_text='solo-lead')):
+        with worker.override(model=TestModel(custom_output_text='unused')):
+            result = await team.run('Nothing to split', usage=usage)
+
+    assert result.data == 'solo-lead'
+    assert usage.requests > 50
+    assert result.usage is usage
+
+
+async def test_synthesize_strips_leader_board_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Synthesize must not offer add_task/assign_task (toolless leader cycle)."""
+    leader_model = TestModel(custom_output_text='final-from-board')
+    leader = Agent(leader_model, name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(leader_agent=leader, members=[worker], max_rounds=1)
+
+    leader_calls = 0
+    board_ref: TaskBoard | None = None
+    tasks_before_synth = 0
+
+    async def _seed_then_real(user_prompt: str, **kwargs: object) -> _FakeRunResult:
+        nonlocal leader_calls, board_ref, tasks_before_synth
+        leader_calls += 1
+        deps = _deps_from_kwargs(kwargs)
+        if leader_calls == 1 and deps is not None:
+            board_ref = deps.board
+            task = await deps.board.add_task('Do it')
+            await deps.board.assign(task.id, 'worker')
+            return _FakeRunResult(output='seeded')
+        assert deps is not None
+        tasks_before_synth = len(deps.board.snapshot())
+        result = await Agent.run(
+            leader,
+            user_prompt,
+            deps=deps,
+            usage=_usage_from_kwargs(kwargs),
+        )
+        return _FakeRunResult(output=result.output)
+
+    monkeypatch.setattr(leader, 'run', _seed_then_real)
+
+    async def _complete_assigned(user_prompt: str, **kwargs: object) -> object:
+        deps = _deps_from_kwargs(kwargs)
+        assert deps is not None
+        for task in deps.board.snapshot():
+            if task.assignee == 'worker' and task.status is not TaskStatus.DONE:
+                await deps.board.complete(task.id, result='done', agent_id='worker')
+        return _FakeRunResult(output='worked')
+
+    monkeypatch.setattr(worker, 'run', _complete_assigned)
+
+    with leader.override(model=leader_model):
+        result = await team.run('Finish work')
+
+    assert result.data == 'final-from-board'
+    assert leader_calls >= 2
+    assert board_ref is not None
+    assert len(board_ref.snapshot()) == tasks_before_synth == 1
+    assert leader_model.last_model_request_parameters is not None
+    tool_names = {t.name for t in leader_model.last_model_request_parameters.function_tools}
+    assert 'add_task' not in tool_names
+    assert 'assign_task' not in tool_names
+
+
+async def test_streaming_propagates_member_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=1,
+        dispatch_mode='streaming',
+    )
+
+    leader_calls = 0
+
+    async def _seed_one_task(user_prompt: str, **kwargs: object) -> _FakeRunResult:
+        nonlocal leader_calls
+        leader_calls += 1
+        deps = _deps_from_kwargs(kwargs)
+        if leader_calls == 1 and deps is not None:
+            task = await deps.board.add_task('Boom')
+            await deps.board.assign(task.id, 'worker')
+            return _FakeRunResult(output='seeded')
+        result = await Agent.run(
+            leader,
+            user_prompt,
+            deps=deps,
+            usage=_usage_from_kwargs(kwargs),
+        )
+        return _FakeRunResult(output=result.output)
+
+    monkeypatch.setattr(leader, 'run', _seed_one_task)
+
+    async def _boom(user_prompt: str, **_kwargs: object) -> object:
+        raise RuntimeError('member failed')
+
+    monkeypatch.setattr(worker, 'run', _boom)
+
+    with pytest.raises(RuntimeError, match='member failed'):
+        await team.run('Ship it')

@@ -29,7 +29,7 @@ DelegateTool = Callable[[RunContext[object], str], Coroutine[object, object, str
 class HierarchicalTeam(BaseTeam[object]):
     """Leader-driven team that registers each member as a delegation tool.
 
-    Mirrors Agno's coordinate mode and pydantic-ai
+    Follows pydantic-ai
     [agent delegation](https://ai.pydantic.dev/multi-agent-applications/):
     nested member runs receive `usage=ctx.usage` so tokens aggregate on the leader run.
     """

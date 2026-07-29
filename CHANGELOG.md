@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional install extra ``pydantic-team[logfire]`` (pulls in ``logfire>=3.0``).
+- `CollaborativeTeam.max_replans` and leader **replan** loop: after incomplete member
+  rounds, the leader may add/assign more tasks (up to `max_replans`, default `0`)
+  before synthesizing; OTel span `collaborative.replan`.
+- `CollaborativeTeam.max_assignments_per_tick`: cap listed assignments per member tick
+  (structural, not prompt-only); member ticks ignore `UnexpectedModelBehavior` from empty
+  model finals after tool calls.
+- `CollaborativeTeam.dispatch_mode`: `'phased'` (default) or `'streaming'` ready-queue
+  dispatch so members start on assign and overlap seed/replan; OTel spans
+  `collaborative.dispatch` / `collaborative.member_tick`.
+- `TaskBoard` wakeup signals on assign/claim/complete for streaming schedulers.
+- `CollaborativeTeam.iter` / `CollaborativeRun` plus `TeamTask` / `TeamEvent` types
+  (`TasksScheduled`, `TaskCompleted`, `PhaseJoined`, `RunEnded`) for step-by-step
+  observation inspired by pydantic-graph (without turning teams into a GraphBuilder).
+
+### Changed
+
+- Docs no longer describe HierarchicalTeam as “Agno coordinate”; wording uses
+  pydantic-ai agent delegation only.
+- Collaborative seed / replan / synthesize / member ticks each use an isolated
+  `agent.run` usage budget; team `usage=` remains the aggregate sum.
+- Collaborative synthesize is toolless (no `add_task` / `assign_task`), so the
+  leader cannot keep mutating the board while producing the final answer.
+
 ## [0.2.0] - 2026-07-28
 
 ### Added
