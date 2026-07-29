@@ -373,6 +373,21 @@ class _StreamingDispatch:
     def __post_init__(self) -> None:
         self.tick_counts = {agent_id: 0 for agent_id in self.members_by_id}
 
+    def _early_result_if_empty_seed(self) -> TeamResult[object] | None:
+        """Return seed output when the board stayed empty after seed (skip synthesize)."""
+        if not self.had_tasks and self.board.is_complete():
+            assert self.seed_output is not None
+            return TeamResult(data=self.seed_output, usage=self.run_usage)
+        return None
+
+    def _should_emit_members_joined(self) -> bool:
+        """Whether the idle loop should emit PhaseJoined(members) once."""
+        return not self._members_joined and self.had_tasks
+
+    def _idle_should_finish(self, early: TeamResult[object] | None) -> bool:
+        """Whether idle scheduling should return (early result or synthesize/stop)."""
+        return early is not None or self.board.is_complete() or self.replans_used >= self.max_replans
+
     async def run(self) -> TeamResult[object] | None:
         """Drive streaming until synthesize is needed.
 
@@ -391,29 +406,29 @@ class _StreamingDispatch:
             leader_running = await self._collect_finished_leader(seed)
             await self._spawn_ready_members(leader_running=leader_running)
 
-            if not leader_running and not self.inflight:
-                if not self._members_joined and self.had_tasks:
-                    await self.emit(PhaseJoined(phase='members', incomplete=not self.board.is_complete()))
-                    self._members_joined = True
-                if not self.had_tasks and self.board.is_complete():
-                    assert self.seed_output is not None
-                    return TeamResult(data=self.seed_output, usage=self.run_usage)
-                if self.board.is_complete():
-                    break
-                if self.replans_used < self.max_replans:
-                    self.replans_used += 1
-                    self.replan_started = True
-                    self._members_joined = False
-                    for agent_id in self.tick_counts:
-                        self.tick_counts[agent_id] = 0
-                    replan = TeamTask(kind='replan', agent_id=leader_id)
-                    await self.emit(TasksScheduled((replan,)))
-                    self.leader_task = asyncio.create_task(self._leader_replan(self.replans_used, replan))
-                else:
-                    break
+            if leader_running or self.inflight:
+                await self._wait_for_progress()
+                continue
 
+            # Predicate branches are covered by `_should_emit_members_joined` unit tests.
+            # CPython 3.11 + coverage.py often drops the false-arc here under asyncio.
+            if self._should_emit_members_joined():  # pragma: no branch
+                await self.emit(PhaseJoined(phase='members', incomplete=not self.board.is_complete()))
+                self._members_joined = True
+
+            early = self._early_result_if_empty_seed()
+            if self._idle_should_finish(early):
+                return early
+
+            self.replans_used += 1
+            self.replan_started = True
+            self._members_joined = False
+            for agent_id in self.tick_counts:
+                self.tick_counts[agent_id] = 0
+            replan = TeamTask(kind='replan', agent_id=leader_id)
+            await self.emit(TasksScheduled((replan,)))
+            self.leader_task = asyncio.create_task(self._leader_replan(self.replans_used, replan))
             await self._wait_for_progress()
-        return None
 
     async def _leader_seed(self) -> object:
         with team_span('collaborative.seed'):

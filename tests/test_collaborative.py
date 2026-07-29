@@ -359,6 +359,114 @@ async def test_streaming_dispatch_early_return_emits_run_ended(
     assert events[-1].result.data == 'forced-early'
 
 
+def test_early_result_if_empty_seed_returns_team_result() -> None:
+    """Deterministic cover of empty-seed early exit (no asyncio scheduler)."""
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    board = TaskBoard()
+    usage = RunUsage()
+
+    async def _emit(_event: object) -> None:
+        return None
+
+    async def _run_member(
+        _member: object,
+        _prompt: str,
+        _board: TaskBoard,
+        _usage: RunUsage,
+    ) -> None:
+        return None
+
+    dispatch_cls = getattr(collaborative_mod, '_StreamingDispatch')
+    dispatch = cast(
+        object,
+        dispatch_cls(
+            leader=leader,
+            members_by_id={'worker': worker},
+            member_ids=['worker'],
+            max_rounds=1,
+            max_replans=0,
+            max_assignments_per_tick=None,
+            user_prompt='goal',
+            run_usage=usage,
+            board=board,
+            lead_deps=BoardDeps(board=board, agent_id='leader'),
+            run_member=_run_member,
+            emit=_emit,
+        ),
+    )
+    setattr(dispatch, 'seed_output', 'solo-from-seed')
+    setattr(dispatch, 'had_tasks', False)
+
+    early = getattr(dispatch, '_early_result_if_empty_seed')()
+    assert early is not None
+    assert early.data == 'solo-from-seed'
+    assert early.usage is usage
+    assert getattr(dispatch, '_idle_should_finish')(early) is True
+    assert getattr(dispatch, '_should_emit_members_joined')() is False
+
+    setattr(dispatch, 'had_tasks', True)
+    assert getattr(dispatch, '_early_result_if_empty_seed')() is None
+    assert getattr(dispatch, '_should_emit_members_joined')() is True
+    assert getattr(dispatch, '_idle_should_finish')(None) is True  # empty board is complete
+
+    incomplete = TaskBoard()
+    asyncio.run(incomplete.add_task('open'))
+    setattr(dispatch, 'board', incomplete)
+    setattr(dispatch, 'replans_used', 0)
+    setattr(dispatch, 'max_replans', 1)
+    assert getattr(dispatch, 'board').is_complete() is False
+    assert getattr(dispatch, '_idle_should_finish')(None) is False
+    assert getattr(dispatch, '_idle_should_finish')(TeamResult(data='x', usage=usage)) is True
+
+
+async def test_streaming_dispatch_run_returns_early_on_empty_seed() -> None:
+    """Wire-up: empty board after seed returns TeamResult from run() (covers return early)."""
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    board = TaskBoard()
+    usage = RunUsage()
+
+    async def _emit(_event: object) -> None:
+        return None
+
+    async def _run_member(
+        _member: object,
+        _prompt: str,
+        _board: TaskBoard,
+        _usage: RunUsage,
+    ) -> None:
+        return None
+
+    dispatch_cls = getattr(collaborative_mod, '_StreamingDispatch')
+    dispatch = cast(
+        object,
+        dispatch_cls(
+            leader=leader,
+            members_by_id={'worker': worker},
+            member_ids=['worker'],
+            max_rounds=1,
+            max_replans=0,
+            max_assignments_per_tick=None,
+            user_prompt='goal',
+            run_usage=usage,
+            board=board,
+            lead_deps=BoardDeps(board=board, agent_id='leader'),
+            run_member=_run_member,
+            emit=_emit,
+        ),
+    )
+
+    async def _instant_seed() -> object:
+        return 'solo-seed-output'
+
+    setattr(dispatch, '_leader_seed', _instant_seed)
+    result = await getattr(dispatch, 'run')()
+    assert result is not None
+    assert result.data == 'solo-seed-output'
+    assert not board.snapshot()
+
+
 @dataclass
 class _FakeRunResult:
     output: object
