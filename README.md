@@ -9,8 +9,8 @@ Type-safe team orchestration for [`pydantic-ai`](https://ai.pydantic.dev) Agents
 v1 provides **hierarchical** and **collaborative** teams for
 [`pydantic-ai`](https://ai.pydantic.dev) Agents:
 
-- `HierarchicalTeam` — leader delegates via tools (Agno coordinate / agent delegation)
-- `CollaborativeTeam` — shared task board with parallel claim/assign
+- `HierarchicalTeam` — leader delegates via tools ([agent delegation](https://ai.pydantic.dev/multi-agent-applications/))
+- `CollaborativeTeam` — shared task board with parallel claim/assign (`phased` or `streaming`)
 
 For **sequential**, branching, or stateful pipelines, use
 [`pydantic-graph`](https://ai.pydantic.dev/graph/) (already pulled in by `pydantic-ai-slim`).
@@ -19,6 +19,8 @@ For **sequential**, branching, or stateful pipelines, use
 
 ```bash
 uv add pydantic-team
+# optional Logfire backend:
+uv add 'pydantic-team[logfire]'
 # or from a checkout:
 uv sync --group lint --group dev
 ```
@@ -90,7 +92,14 @@ details, and `TestModel` testing.
 
 Shared [`TaskBoard`](docs/collaborative.md): the leader creates tasks and **assigns
 them by role**; members complete their assigned work in parallel rounds
-(`max_rounds`). Peer messaging is not included yet.
+(`max_rounds`). Use `dispatch_mode='streaming'` so members start as soon as they
+are assigned (overlap with seed/replan); the default `'phased'` keeps a seed
+barrier. Optionally cap how many assignments each member sees per tick
+(`max_assignments_per_tick`). If work remains, the leader can **replan**
+(`max_replans`, default `0`) before the final synthesize. Each seed / replan /
+synthesize / member tick is an isolated agent run for usage limits; team `usage`
+aggregates them. Synthesize is toolless (no board mutation). Peer messaging is not
+included yet.
 
 ```python
 from pydantic_ai import Agent
@@ -111,8 +120,19 @@ team = CollaborativeTeam(
     leader_model='openai:gpt-4.1',
     members=[researcher, writer],
     max_rounds=3,
+    max_replans=2,
+    dispatch_mode='streaming',
 )
 result = await team.run('Draft a short brief on agent teams')
+```
+
+Or observe the run step by step:
+
+```python
+async with team.iter('Draft a short brief on agent teams') as run:
+    async for event in run:
+        ...  # TasksScheduled / TaskCompleted / PhaseJoined / RunEnded
+    assert run.result is not None
 ```
 
 ### Result type

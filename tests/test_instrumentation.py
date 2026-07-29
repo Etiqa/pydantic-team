@@ -207,3 +207,85 @@ async def test_collaborative_no_spans_without_instrument() -> None:
             await team.run('x')
 
     assert all(not span.name.startswith('collaborative.') for span in exporter.get_finished_spans())
+
+
+async def test_collaborative_max_replans_zero_skips_replan_when_incomplete() -> None:
+    _disable_instrumentation()
+    exporter = _span_exporter()
+    instrument_pydantic_team()
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(leader_agent=leader, members=[worker], max_rounds=1, max_replans=0)
+
+    with leader.override(model=TestModel(custom_output_text='final')):
+        with worker.override(model=TestModel(call_tools=[], custom_output_text='noop')):
+            result = await team.run('Leave work unfinished')
+
+    assert result.data == 'final'
+    names = [span.name for span in exporter.get_finished_spans()]
+    assert 'collaborative.round' in names
+    assert 'collaborative.synthesize' in names
+    assert 'collaborative.replan' not in names
+
+
+async def test_collaborative_streaming_dispatch_spans() -> None:
+    _disable_instrumentation()
+    exporter = _span_exporter()
+    instrument_pydantic_team()
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=1,
+        dispatch_mode='streaming',
+    )
+
+    with leader.override(model=TestModel(call_tools=[], custom_output_text='solo')):
+        with worker.override(model=TestModel(custom_output_text='unused')):
+            result = await team.run('Nothing to split')
+
+    assert result.data == 'solo'
+    names = [span.name for span in exporter.get_finished_spans()]
+    assert 'collaborative.run' in names
+    assert 'collaborative.dispatch' in names
+    assert 'collaborative.seed' in names
+    assert 'collaborative.round' not in names
+    assert 'collaborative.synthesize' not in names
+
+
+async def test_collaborative_replan_runs_when_board_incomplete() -> None:
+    _disable_instrumentation()
+    exporter = _span_exporter()
+    instrument_pydantic_team()
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(leader_agent=leader, members=[worker], max_rounds=1, max_replans=1)
+
+    with leader.override(model=TestModel(custom_output_text='final')):
+        with worker.override(model=TestModel(call_tools=[], custom_output_text='noop')):
+            result = await team.run('Need more planning')
+
+    assert result.data == 'final'
+    names = [span.name for span in exporter.get_finished_spans()]
+    assert 'collaborative.replan' in names
+    assert names.count('collaborative.round') >= 2
+    assert 'collaborative.synthesize' in names
+
+
+async def test_collaborative_replan_budget_exhausted_still_synthesizes() -> None:
+    _disable_instrumentation()
+    exporter = _span_exporter()
+    instrument_pydantic_team()
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(leader_agent=leader, members=[worker], max_rounds=1, max_replans=2)
+
+    with leader.override(model=TestModel(custom_output_text='final-after-budget')):
+        with worker.override(model=TestModel(call_tools=[], custom_output_text='noop')):
+            result = await team.run('Never finishes')
+
+    assert result.data == 'final-after-budget'
+    names = [span.name for span in exporter.get_finished_spans()]
+    assert names.count('collaborative.replan') == 2
+    assert 'collaborative.synthesize' in names

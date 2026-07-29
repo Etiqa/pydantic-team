@@ -98,3 +98,45 @@ async def test_assign_done_task_fails() -> None:
     await board.complete(task.id, result='ok', agent_id='a')
     with pytest.raises(TaskClaimError):
         await board.assign(task.id, 'b')
+
+
+async def test_assign_signals_wakeup_with_assignee() -> None:
+    board = TaskBoard()
+    task = await board.add_task('Wake me')
+    waiter = asyncio.create_task(board.wait_wakeup())
+    await asyncio.sleep(0)
+    await board.assign(task.id, 'researcher')
+    agents = await asyncio.wait_for(waiter, timeout=1)
+    assert agents == {'researcher'}
+
+
+async def test_claim_signals_wakeup_with_claimant() -> None:
+    board = TaskBoard()
+    task = await board.add_task('Claim me')
+    waiter = asyncio.create_task(board.wait_wakeup())
+    await asyncio.sleep(0)
+    await board.claim(task.id, 'writer')
+    agents = await asyncio.wait_for(waiter, timeout=1)
+    assert agents == {'writer'}
+
+
+async def test_complete_signals_wakeup_without_agent() -> None:
+    board = TaskBoard()
+    task = await board.add_task('Finish me')
+    await board.claim(task.id, 'alice')
+    # Drain claim wakeup so complete's signal is observed alone.
+    await board.wait_wakeup()
+    waiter = asyncio.create_task(board.wait_wakeup())
+    await asyncio.sleep(0)
+    await board.complete(task.id, result='done', agent_id='alice')
+    agents = await asyncio.wait_for(waiter, timeout=1)
+    assert agents == set()
+
+
+async def test_signal_wakeup_wakes_waiter() -> None:
+    board = TaskBoard()
+    waiter = asyncio.create_task(board.wait_wakeup())
+    await asyncio.sleep(0)
+    board.signal_wakeup('solo')
+    agents = await asyncio.wait_for(waiter, timeout=1)
+    assert agents == {'solo'}

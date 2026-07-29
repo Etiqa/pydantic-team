@@ -46,6 +46,8 @@ class TaskBoard:
     _tasks: dict[str, Task] = field(default_factory=lambda: {})
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _counter: int = 0
+    _wakeup: asyncio.Event = field(default_factory=asyncio.Event)
+    _wakeup_agents: set[str] = field(default_factory=lambda: set[str]())
 
     async def add_task(self, title: str, description: str = '') -> Task:
         """Create an open task and return its snapshot."""
@@ -71,7 +73,8 @@ class TaskBoard:
                 raise TaskClaimError(f'task {task_id!r} is not open (status={task.status})')
             updated = replace(task, status=TaskStatus.CLAIMED, assignee=agent_id)
             self._tasks[task_id] = updated
-            return updated
+        self.signal_wakeup(agent_id)
+        return updated
 
     async def assign(self, task_id: str, agent_id: str) -> Task:
         """Force-assign a non-done task to `agent_id` (lead operation)."""
@@ -81,7 +84,8 @@ class TaskBoard:
                 raise TaskClaimError(f'task {task_id!r} is already done')
             updated = replace(task, status=TaskStatus.CLAIMED, assignee=agent_id)
             self._tasks[task_id] = updated
-            return updated
+        self.signal_wakeup(agent_id)
+        return updated
 
     async def complete(self, task_id: str, *, result: str, agent_id: str) -> Task:
         """Mark a claimed task done; only the assignee may complete it."""
@@ -93,7 +97,9 @@ class TaskBoard:
                 raise TaskClaimError(f'task {task_id!r} is assigned to {task.assignee!r}, not {agent_id!r}')
             updated = replace(task, status=TaskStatus.DONE, result=result)
             self._tasks[task_id] = updated
-            return updated
+        # Wake the scheduler so it can drain, replan, or synthesize.
+        self.signal_wakeup()
+        return updated
 
     def is_complete(self) -> bool:
         """Return True when there are no tasks or every task is done."""
@@ -104,6 +110,20 @@ class TaskBoard:
     def snapshot(self) -> list[Task]:
         """Return a stable list copy of all tasks (asyncio-safe between awaits)."""
         return list(self._tasks.values())
+
+    def signal_wakeup(self, agent_id: str | None = None) -> None:
+        """Wake waiters; optionally record which agent gained work."""
+        if agent_id is not None:
+            self._wakeup_agents.add(agent_id)
+        self._wakeup.set()
+
+    async def wait_wakeup(self) -> set[str]:
+        """Block until ``signal_wakeup``; return agent ids recorded since last wait."""
+        await self._wakeup.wait()
+        self._wakeup.clear()
+        agents = set(self._wakeup_agents)
+        self._wakeup_agents.clear()
+        return agents
 
     def _require(self, task_id: str) -> Task:
         try:
