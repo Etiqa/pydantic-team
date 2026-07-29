@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import cast
 
@@ -20,12 +21,14 @@ from pydantic_team.collaborative import (
     claim_task,
     complete_task,
     default_leader_instructions,
+    list_messages,
     list_tasks,
     member_work_prompt,
     replan_user_prompt,
     seed_user_prompt,
+    send_message,
 )
-from pydantic_team.events import PhaseJoined, RunEnded, TasksScheduled
+from pydantic_team.events import MessagePosted, PhaseJoined, RunEnded, TasksScheduled, TeamEvent
 
 
 @dataclass
@@ -33,8 +36,24 @@ class _FakeCtx:
     deps: object
 
 
-def _ctx(board: TaskBoard, agent_id: str) -> RunContext[object]:
-    return cast(RunContext[object], _FakeCtx(deps=BoardDeps(board=board, agent_id=agent_id)))
+def _ctx(
+    board: TaskBoard,
+    agent_id: str,
+    *,
+    member_ids: tuple[str, ...] = ('alice', 'bob'),
+    emit: Callable[[TeamEvent], Awaitable[None]] | None = None,
+) -> RunContext[object]:
+    return cast(
+        RunContext[object],
+        _FakeCtx(
+            deps=BoardDeps(
+                board=board,
+                agent_id=agent_id,
+                member_ids=member_ids,
+                emit=emit,
+            )
+        ),
+    )
 
 
 def test_collaborative_requires_leader() -> None:
@@ -76,6 +95,16 @@ def test_replan_user_prompt_includes_goal_roster_and_board() -> None:
     assert 'add_task' in text
     assert 'assign_task' in text
     assert '(empty)' in text
+    assert 'Messages:\n(none)' in text
+
+
+async def test_replan_user_prompt_includes_messages() -> None:
+    board = TaskBoard()
+    await board.post_message('researcher', 'writer', 'draft ready')
+    text = replan_user_prompt('Ship it', ['researcher', 'writer'], board)
+    assert 'Messages:' in text
+    assert 'researcher->writer' in text
+    assert 'draft ready' in text
 
 
 async def test_collaborative_run_returns_team_result() -> None:
@@ -204,6 +233,59 @@ async def test_board_tools_error_and_success_paths() -> None:
     assert 'Error' in await complete_task(ctx2, open_task.id, 'again')
 
 
+async def test_send_and_list_messages_tools() -> None:
+    board = TaskBoard()
+    emitted: list[TeamEvent] = []
+
+    async def _emit(event: TeamEvent) -> None:
+        emitted.append(event)
+
+    alice = _ctx(board, 'alice', member_ids=('alice', 'bob'), emit=_emit)
+    bob = _ctx(board, 'bob', member_ids=('alice', 'bob'))
+    leader = _ctx(board, 'leader', member_ids=('alice', 'bob'))
+
+    assert await list_messages(alice) == 'No messages'
+    assert 'Error: cannot send a message to yourself' in await send_message(alice, 'alice', 'noop')
+    assert 'Error: unknown teammate' in await send_message(alice, 'carol', 'hi')
+    assert 'Error: to must be a teammate id or "*"' in await send_message(alice, '  ', 'hi')
+
+    sent = await send_message(alice, 'bob', 'need outline', task_id='')
+    assert sent.startswith('Sent msg-')
+    assert len(emitted) == 1
+    assert isinstance(emitted[0], MessagePosted)
+    assert emitted[0].message.body == 'need outline'
+
+    bob_view = await list_messages(bob)
+    assert 'alice->bob' in bob_view
+    assert 'need outline' in bob_view
+
+    await send_message(alice, '*', 'standup')
+    assert 'alice->*' in await list_messages(bob)
+
+    # Leader sees the full log.
+    leader_view = await list_messages(leader)
+    assert 'need outline' in leader_view
+    assert 'standup' in leader_view
+
+    task = await board.add_task('Write')
+    assert 'Sent' in await send_message(alice, 'bob', 'about task', task_id=task.id)
+    assert f'task={task.id}' in await list_messages(bob)
+    assert 'Error:' in await send_message(alice, 'bob', 'bad link', task_id='missing')
+
+    # emit=None still posts successfully.
+    silent = _ctx(board, 'bob', member_ids=('alice', 'bob'), emit=None)
+    assert 'Sent' in await send_message(silent, 'alice', 'ack')
+
+
+async def test_member_work_prompt_includes_visible_messages() -> None:
+    board = TaskBoard()
+    await board.post_message('alice', 'researcher', 'fyi')
+    await board.post_message('writer', 'alice', 'secret')
+    prompt = member_work_prompt('Goal', 'researcher', board)
+    assert 'alice->researcher' in prompt
+    assert 'secret' not in prompt
+
+
 async def test_board_deps_type_error() -> None:
     with pytest.raises(TypeError, match='BoardDeps'):
         await list_tasks(cast(RunContext[object], _FakeCtx(deps='nope')), None)
@@ -215,6 +297,7 @@ def test_default_leader_instructions_require_assign_by_role() -> None:
     assert 'writer' in text
     assert 'assign_task' in text
     assert 'Do not leave tasks open without an assignee' in text
+    assert 'list_messages' in text
 
 
 def test_seed_user_prompt_includes_roster() -> None:
@@ -236,6 +319,8 @@ async def test_member_work_prompt_lists_only_own_assignments() -> None:
     assert 'do not claim tasks assigned to others' in researcher_prompt
     assert research.id in researcher_prompt
     assert 'Tasks assigned to you:\n- task-1' in researcher_prompt
+    assert 'send_message' in researcher_prompt
+    assert 'Messages visible to you:\n(none)' in researcher_prompt
 
     writer_prompt = member_work_prompt('Brief', 'writer', board)
     assert writing.id in writer_prompt
@@ -374,6 +459,7 @@ def test_early_result_if_empty_seed_returns_team_result() -> None:
         _prompt: str,
         _board: TaskBoard,
         _usage: RunUsage,
+        _emit: object,
     ) -> None:
         return None
 
@@ -390,7 +476,7 @@ def test_early_result_if_empty_seed_returns_team_result() -> None:
             user_prompt='goal',
             run_usage=usage,
             board=board,
-            lead_deps=BoardDeps(board=board, agent_id='leader'),
+            lead_deps=BoardDeps(board=board, agent_id='leader', member_ids=('worker',)),
             run_member=_run_member,
             emit=_emit,
         ),
@@ -434,6 +520,7 @@ async def test_emit_members_joined_if_needed_both_paths() -> None:
         _prompt: str,
         _board: TaskBoard,
         _usage: RunUsage,
+        _emit: object,
     ) -> None:
         return None
 
@@ -450,7 +537,7 @@ async def test_emit_members_joined_if_needed_both_paths() -> None:
             user_prompt='goal',
             run_usage=usage,
             board=board,
-            lead_deps=BoardDeps(board=board, agent_id='leader'),
+            lead_deps=BoardDeps(board=board, agent_id='leader', member_ids=('worker',)),
             run_member=_run_member,
             emit=_emit,
         ),
@@ -487,6 +574,7 @@ async def test_streaming_dispatch_run_returns_early_on_empty_seed() -> None:
         _prompt: str,
         _board: TaskBoard,
         _usage: RunUsage,
+        _emit: object,
     ) -> None:
         return None
 
@@ -503,7 +591,7 @@ async def test_streaming_dispatch_run_returns_early_on_empty_seed() -> None:
             user_prompt='goal',
             run_usage=usage,
             board=board,
-            lead_deps=BoardDeps(board=board, agent_id='leader'),
+            lead_deps=BoardDeps(board=board, agent_id='leader', member_ids=('worker',)),
             run_member=_run_member,
             emit=_emit,
         ),

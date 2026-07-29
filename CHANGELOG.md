@@ -21,8 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `collaborative.dispatch` / `collaborative.member_tick`.
 - `TaskBoard` wakeup signals on assign/claim/complete for streaming schedulers.
 - `CollaborativeTeam.iter` / `CollaborativeRun` plus `TeamTask` / `TeamEvent` types
-  (`TasksScheduled`, `TaskCompleted`, `PhaseJoined`, `RunEnded`) for step-by-step
-  observation inspired by pydantic-graph (without turning teams into a GraphBuilder).
+  (`TasksScheduled`, `TaskCompleted`, `PhaseJoined`, `MessagePosted`, `RunEnded`) for
+  step-by-step observation inspired by pydantic-graph (without turning teams into a
+  GraphBuilder).
+- Peer messaging on `TaskBoard`: `BoardMessage`, `post_message` / `list_messages`;
+  member tools `send_message` / `list_messages`; leader `list_messages` (read-only);
+  `MessagePosted` events; optional `task_id` link; broadcast with `to='*'`.
 
 ### Changed
 

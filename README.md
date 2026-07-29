@@ -98,8 +98,9 @@ barrier. Optionally cap how many assignments each member sees per tick
 (`max_assignments_per_tick`). If work remains, the leader can **replan**
 (`max_replans`, default `0`) before the final synthesize. Each seed / replan /
 synthesize / member tick is an isolated agent run for usage limits; team `usage`
-aggregates them. Synthesize is toolless (no board mutation). Peer messaging is not
-included yet.
+aggregates them. Synthesize is toolless (no board mutation). Members may message each
+other directly (`send_message` / `list_messages`); the leader can observe with
+`list_messages`.
 
 ```python
 from pydantic_ai import Agent
@@ -131,7 +132,7 @@ Or observe the run step by step:
 ```python
 async with team.iter('Draft a short brief on agent teams') as run:
     async for event in run:
-        ...  # TasksScheduled / TaskCompleted / PhaseJoined / RunEnded
+        ...  # TasksScheduled / TaskCompleted / PhaseJoined / MessagePosted / RunEnded
     assert run.result is not None
 ```
 

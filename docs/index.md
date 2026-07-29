@@ -15,8 +15,9 @@ v1 provides:
 
 ## What this library is not
 
-Collaborative mode does **not** yet include peer-to-peer messaging between teammates
-or a fully autonomous multi-agent “inbox” loop beyond board claim/assign rounds.
+Collaborative mode does **not** yet include a fully autonomous multi-agent “inbox”
+loop beyond board claim/assign rounds and peer `send_message` / `list_messages`.
+Members cannot create sub-tasks; there is no per-task approve/reject gate yet.
 
 For **sequential**, branching, or stateful pipelines, use
 [`pydantic-graph`](https://ai.pydantic.dev/graph/) instead of inventing another workflow type.
@@ -25,8 +26,8 @@ For **sequential**, branching, or stateful pipelines, use
 |------|-----|
 | Leader delegates and synthesizes | [`HierarchicalTeam`](hierarchical.md) |
 | Shared task board + parallel / streaming dispatch + optional replan | [`CollaborativeTeam`](collaborative.md) |
+| Peer DM / broadcast between teammates | [`CollaborativeTeam`](collaborative.md) (`send_message`) |
 | Ordered / branching / stateful flow | [pydantic-graph](https://ai.pydantic.dev/graph/) |
-| Peer DM between teammates | Not yet |
 
 ## Install
 

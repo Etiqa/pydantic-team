@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from pydantic_team.base import TeamResult
+from pydantic_team.board import BoardMessage
 
 TaskKind = Literal['seed', 'member_tick', 'replan', 'synthesize']
 PhaseName = Literal['seed', 'members', 'replan']
@@ -43,10 +44,17 @@ class PhaseJoined:
 
 
 @dataclass(frozen=True)
+class MessagePosted:
+    """A teammate posted a peer message on the board."""
+
+    message: BoardMessage
+
+
+@dataclass(frozen=True)
 class RunEnded:
     """The collaborative run finished with a final result."""
 
     result: TeamResult[object]
 
 
-TeamEvent = TasksScheduled | TaskCompleted | PhaseJoined | RunEnded
+TeamEvent = TasksScheduled | TaskCompleted | PhaseJoined | MessagePosted | RunEnded
