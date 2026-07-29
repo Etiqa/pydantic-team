@@ -25,7 +25,7 @@ from pydantic_team.collaborative import (
     replan_user_prompt,
     seed_user_prompt,
 )
-from pydantic_team.events import RunEnded, TasksScheduled
+from pydantic_team.events import PhaseJoined, RunEnded, TasksScheduled
 
 
 @dataclass
@@ -403,11 +403,9 @@ def test_early_result_if_empty_seed_returns_team_result() -> None:
     assert early.data == 'solo-from-seed'
     assert early.usage is usage
     assert getattr(dispatch, '_idle_should_finish')(early) is True
-    assert getattr(dispatch, '_should_emit_members_joined')() is False
 
     setattr(dispatch, 'had_tasks', True)
     assert getattr(dispatch, '_early_result_if_empty_seed')() is None
-    assert getattr(dispatch, '_should_emit_members_joined')() is True
     assert getattr(dispatch, '_idle_should_finish')(None) is True  # empty board is complete
 
     incomplete = TaskBoard()
@@ -418,6 +416,60 @@ def test_early_result_if_empty_seed_returns_team_result() -> None:
     assert getattr(dispatch, 'board').is_complete() is False
     assert getattr(dispatch, '_idle_should_finish')(None) is False
     assert getattr(dispatch, '_idle_should_finish')(TeamResult(data='x', usage=usage)) is True
+
+
+async def test_emit_members_joined_if_needed_both_paths() -> None:
+    """Deterministic cover of PhaseJoined(members) emit vs no-op (no asyncio scheduler)."""
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    board = TaskBoard()
+    usage = RunUsage()
+    emitted: list[object] = []
+
+    async def _emit(event: object) -> None:
+        emitted.append(event)
+
+    async def _run_member(
+        _member: object,
+        _prompt: str,
+        _board: TaskBoard,
+        _usage: RunUsage,
+    ) -> None:
+        return None
+
+    dispatch_cls = getattr(collaborative_mod, '_StreamingDispatch')
+    dispatch = cast(
+        object,
+        dispatch_cls(
+            leader=leader,
+            members_by_id={'worker': worker},
+            member_ids=['worker'],
+            max_rounds=1,
+            max_replans=0,
+            max_assignments_per_tick=None,
+            user_prompt='goal',
+            run_usage=usage,
+            board=board,
+            lead_deps=BoardDeps(board=board, agent_id='leader'),
+            run_member=_run_member,
+            emit=_emit,
+        ),
+    )
+
+    setattr(dispatch, 'had_tasks', False)
+    await getattr(dispatch, '_emit_members_joined_if_needed')()
+    assert emitted == []
+    assert getattr(dispatch, '_members_joined') is False
+
+    setattr(dispatch, 'had_tasks', True)
+    await getattr(dispatch, '_emit_members_joined_if_needed')()
+    assert len(emitted) == 1
+    assert isinstance(emitted[0], PhaseJoined)
+    assert emitted[0].phase == 'members'
+    assert getattr(dispatch, '_members_joined') is True
+
+    await getattr(dispatch, '_emit_members_joined_if_needed')()
+    assert len(emitted) == 1
 
 
 async def test_streaming_dispatch_run_returns_early_on_empty_seed() -> None:

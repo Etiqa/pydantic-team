@@ -380,9 +380,12 @@ class _StreamingDispatch:
             return TeamResult(data=self.seed_output, usage=self.run_usage)
         return None
 
-    def _should_emit_members_joined(self) -> bool:
-        """Whether the idle loop should emit PhaseJoined(members) once."""
-        return not self._members_joined and self.had_tasks
+    async def _emit_members_joined_if_needed(self) -> None:
+        """Emit PhaseJoined(members) once when the board had work after seed."""
+        if self._members_joined or not self.had_tasks:
+            return
+        await self.emit(PhaseJoined(phase='members', incomplete=not self.board.is_complete()))
+        self._members_joined = True
 
     def _idle_should_finish(self, early: TeamResult[object] | None) -> bool:
         """Whether idle scheduling should return (early result or synthesize/stop)."""
@@ -410,11 +413,7 @@ class _StreamingDispatch:
                 await self._wait_for_progress()
                 continue
 
-            # Predicate branches are covered by `_should_emit_members_joined` unit tests.
-            # CPython 3.11 + coverage.py often drops the false-arc here under asyncio.
-            if self._should_emit_members_joined():  # pragma: no branch
-                await self.emit(PhaseJoined(phase='members', incomplete=not self.board.is_complete()))
-                self._members_joined = True
+            await self._emit_members_joined_if_needed()
 
             early = self._early_result_if_empty_seed()
             if self._idle_should_finish(early):
