@@ -14,9 +14,11 @@ Public exports from [`pydantic_team`][pydantic_team].
         - TasksScheduled
         - TaskCompleted
         - PhaseJoined
+        - MessagePosted
         - RunEnded
         - TaskBoard
         - Task
+        - BoardMessage
         - TaskStatus
         - BoardDeps
         - instrument_pydantic_team
@@ -39,6 +41,8 @@ Public exports from [`pydantic_team`][pydantic_team].
 
 ::: pydantic_team.board.Task
 
+::: pydantic_team.board.BoardMessage
+
 ::: pydantic_team.board.TaskBoard
 
 ::: pydantic_team.collaborative.BoardDeps
@@ -56,5 +60,7 @@ Public exports from [`pydantic_team`][pydantic_team].
 ::: pydantic_team.events.TaskCompleted
 
 ::: pydantic_team.events.PhaseJoined
+
+::: pydantic_team.events.MessagePosted
 
 ::: pydantic_team.events.RunEnded

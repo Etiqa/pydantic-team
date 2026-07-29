@@ -7,6 +7,62 @@ import pytest
 from pydantic_team.board import TaskBoard, TaskClaimError, TaskNotFoundError, TaskStatus
 
 
+async def test_post_and_list_messages() -> None:
+    board = TaskBoard()
+    msg = await board.post_message('alice', 'bob', 'need sources')
+    assert msg.id.startswith('msg-')
+    assert msg.sender == 'alice'
+    assert msg.to == 'bob'
+    assert msg.body == 'need sources'
+    assert msg.task_id is None
+    assert board.messages_snapshot() == [msg]
+    assert await board.list_messages() == [msg]
+
+
+async def test_list_messages_filters_for_agent() -> None:
+    board = TaskBoard()
+    dm = await board.post_message('alice', 'bob', 'private')
+    broadcast = await board.post_message('alice', '*', 'hello all')
+    other = await board.post_message('carol', 'dave', 'ignore')
+    _ = other
+    visible = await board.list_messages(agent_id='bob')
+    assert {m.id for m in visible} == {dm.id, broadcast.id}
+    # Sender sees their own outbound messages.
+    alice_view = await board.list_messages(agent_id='alice')
+    assert {m.id for m in alice_view} == {dm.id, broadcast.id}
+
+
+async def test_post_message_with_task_id() -> None:
+    board = TaskBoard()
+    task = await board.add_task('Research')
+    msg = await board.post_message('alice', 'bob', 'about this', task_id=task.id)
+    assert msg.task_id == task.id
+
+
+async def test_post_message_unknown_task_fails() -> None:
+    board = TaskBoard()
+    with pytest.raises(TaskNotFoundError):
+        await board.post_message('alice', 'bob', 'x', task_id='missing')
+
+
+async def test_post_message_direct_signals_wakeup_recipient() -> None:
+    board = TaskBoard()
+    waiter = asyncio.create_task(board.wait_wakeup())
+    await asyncio.sleep(0)
+    await board.post_message('alice', 'bob', 'ping')
+    agents = await asyncio.wait_for(waiter, timeout=1)
+    assert agents == {'bob'}
+
+
+async def test_post_message_broadcast_signals_wakeup_without_agent() -> None:
+    board = TaskBoard()
+    waiter = asyncio.create_task(board.wait_wakeup())
+    await asyncio.sleep(0)
+    await board.post_message('alice', '*', 'ping all')
+    agents = await asyncio.wait_for(waiter, timeout=1)
+    assert agents == set()
+
+
 async def test_add_and_list_tasks() -> None:
     board = TaskBoard()
     t1 = await board.add_task('Research', 'Find sources')

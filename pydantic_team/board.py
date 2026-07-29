@@ -27,6 +27,17 @@ class Task:
     result: str | None = None
 
 
+@dataclass(frozen=True)
+class BoardMessage:
+    """A peer message posted on the shared board."""
+
+    id: str
+    sender: str
+    to: str
+    body: str
+    task_id: str | None = None
+
+
 class TaskBoardError(Exception):
     """Base error for task board operations."""
 
@@ -44,8 +55,10 @@ class TaskBoard:
     """Thread-safe in-process task list shared by a collaborative team."""
 
     _tasks: dict[str, Task] = field(default_factory=lambda: {})
+    _messages: list[BoardMessage] = field(default_factory=lambda: list[BoardMessage]())
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _counter: int = 0
+    _message_counter: int = 0
     _wakeup: asyncio.Event = field(default_factory=asyncio.Event)
     _wakeup_agents: set[str] = field(default_factory=lambda: set[str]())
 
@@ -64,6 +77,47 @@ class TaskBoard:
         if status is not None:
             tasks = [task for task in tasks if task.status is status]
         return tasks
+
+    async def post_message(
+        self,
+        sender: str,
+        to: str,
+        body: str,
+        *,
+        task_id: str | None = None,
+    ) -> BoardMessage:
+        """Append a peer message; optionally link to an existing task."""
+        async with self._lock:
+            if task_id is not None:
+                self._require(task_id)
+            self._message_counter += 1
+            message = BoardMessage(
+                id=f'msg-{self._message_counter}',
+                sender=sender,
+                to=to,
+                body=body,
+                task_id=task_id,
+            )
+            self._messages.append(message)
+        if to == '*':
+            self.signal_wakeup()
+        else:
+            self.signal_wakeup(to)
+        return message
+
+    async def list_messages(self, *, agent_id: str | None = None) -> list[BoardMessage]:
+        """Return messages; when ``agent_id`` is set, only visible ones for that agent."""
+        async with self._lock:
+            messages = list(self._messages)
+        if agent_id is None:
+            return messages
+        return [
+            message for message in messages if message.to == agent_id or message.to == '*' or message.sender == agent_id
+        ]
+
+    def messages_snapshot(self) -> list[BoardMessage]:
+        """Return a stable list copy of all messages (asyncio-safe between awaits)."""
+        return list(self._messages)
 
     async def claim(self, task_id: str, agent_id: str) -> Task:
         """Atomically claim an open task for `agent_id`."""

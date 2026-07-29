@@ -12,11 +12,14 @@ synthesizes), collaborative mode:
    overlapping seed/replan)
 3. If the board is still incomplete and `max_replans` allows it, the leader
    **replans** (more `add_task` / `assign_task`), then member work continues
-4. Leader synthesizes a final answer from the board (**toolless** cycle: board
-   mutation tools are not available; the completed board is passed in the prompt)
+4. Leader synthesizes a final answer from the board and peer messages (**toolless**
+   cycle: board mutation tools are not available; the completed board and message
+   log are passed in the prompt)
 
-Peer-to-peer messaging between teammates is **not** included yet. Members cannot
-create sub-tasks in this version. There is no per-task approve/reject gate yet.
+Members may **message each other directly** (`send_message` / `list_messages`) without
+routing through the leader. The leader can **observe** messages with `list_messages`
+during seed/replan. Members cannot create sub-tasks in this version. There is no
+per-task approve/reject gate yet.
 
 ```mermaid
 flowchart TD
@@ -40,12 +43,14 @@ For step-by-step observation (inspired by [pydantic-graph](https://ai.pydantic.d
 `iter`, without modeling the team as a GraphBuilder):
 
 ```python
-from pydantic_team import CollaborativeTeam, PhaseJoined, RunEnded, TasksScheduled
+from pydantic_team import CollaborativeTeam, MessagePosted, PhaseJoined, RunEnded, TasksScheduled
 
 async with team.iter('Produce a short report') as run:
     async for event in run:
         if isinstance(event, TasksScheduled):
             print('scheduled', [t.kind for t in event.tasks])
+        elif isinstance(event, MessagePosted):
+            print('message', event.message.sender, '->', event.message.to)
         elif isinstance(event, PhaseJoined):
             print('joined', event.phase, 'incomplete=', event.incomplete)
         elif isinstance(event, RunEnded):
@@ -53,8 +58,9 @@ async with team.iter('Produce a short report') as run:
     assert run.result is not None
 ```
 
-Events: `TasksScheduled`, `TaskCompleted`, `PhaseJoined`, `RunEnded` (see
-[`TeamTask`][pydantic_team.events.TeamTask]). Use `run.board` for a live snapshot.
+Events: `TasksScheduled`, `TaskCompleted`, `PhaseJoined`, `MessagePosted`, `RunEnded`
+(see [`TeamTask`][pydantic_team.events.TeamTask]). Use `run.board` for a live snapshot
+(including `messages_snapshot()`).
 
 ## Construction
 
@@ -106,9 +112,13 @@ print(result.usage)
 
 | Who | Tools |
 |-----|--------|
-| Lead (seed / replan) | `add_task`, `assign_task`, `list_tasks` |
-| Lead (synthesize) | none — final answer only |
-| Members | `list_tasks`, `claim_task`, `complete_task` |
+| Lead (seed / replan) | `add_task`, `assign_task`, `list_tasks`, `list_messages` |
+| Lead (synthesize) | none — final answer only (board + messages in prompt) |
+| Members | `list_tasks`, `claim_task`, `complete_task`, `send_message`, `list_messages` |
+
+`send_message(to, body, task_id='')` posts a peer DM (`to` = teammate id) or broadcast
+(`to='*'`). Optional `task_id` links the message to an existing task. Direct messages
+wake the recipient in streaming dispatch (same wakeup path as assign/claim).
 
 After `assign_task`, the task is `claimed` for that assignee (not stealable via claim).
 Claim remains for residual `open` tasks only.
@@ -124,6 +134,9 @@ Board tool calls are visible via `logfire.instrument_pydantic_ai()` — see
 
 See [`Task`][pydantic_team.board.Task] / [`TaskStatus`][pydantic_team.board.TaskStatus]:
 `open` → `claimed` → `done`, with optional `assignee` and `result`.
+
+Peer messages use [`BoardMessage`][pydantic_team.board.BoardMessage] on the same board
+(`sender`, `to`, `body`, optional `task_id`).
 
 ## Testing
 

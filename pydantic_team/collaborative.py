@@ -15,6 +15,7 @@ from pydantic_team._instrumentation import team_span
 from pydantic_team.base import BaseTeam, TeamResult
 from pydantic_team.board import Task, TaskBoard, TaskBoardError, TaskStatus
 from pydantic_team.events import (
+    MessagePosted,
     PhaseJoined,
     RunEnded,
     TaskCompleted,
@@ -26,6 +27,7 @@ from pydantic_team.events import (
 AnyAgent = Agent[object, object]
 DispatchMode = Literal['phased', 'streaming']
 EmitFn = Callable[[TeamEvent], Awaitable[None]]
+RunMemberFn = Callable[[AnyAgent, str, TaskBoard, RunUsage, EmitFn], Awaitable[None]]
 
 
 def default_leader_instructions(member_ids: Sequence[str]) -> str:
@@ -37,7 +39,8 @@ def default_leader_instructions(member_ids: Sequence[str]) -> str:
         'Break the user goal into concrete tasks with add_task, then immediately '
         'assign_task each task to the most suitable teammate by role. '
         'Do not leave tasks open without an assignee. '
-        'When asked to synthesize, summarize completed task results.'
+        'Teammates may message each other directly; use list_messages to observe. '
+        'When asked to synthesize, summarize completed task results and relevant messages.'
     )
 
 
@@ -60,13 +63,17 @@ def replan_user_prompt(user_prompt: str, member_ids: Sequence[str], board: TaskB
         'Review the board after member work. '
         'If the goal still needs work, add_task and assign_task for the missing pieces. '
         'If results already cover the goal, do not invent unnecessary tasks.\n'
-        f'Current board:\n{_format_board(board)}'
+        f'Current board:\n{_format_board(board)}\n'
+        f'Messages:\n{_format_messages(board)}'
     )
 
 
 def synthesize_leader_instructions() -> str:
     """Instructions for the toolless synthesize cycle (no board mutation)."""
-    return 'Produce a final answer from the completed board snapshot. Do not create, assign, or claim tasks.'
+    return (
+        'Produce a final answer from the completed board snapshot and peer messages. '
+        'Do not create, assign, or claim tasks.'
+    )
 
 
 async def _run_agent_cycle(
@@ -115,9 +122,11 @@ def member_work_prompt(
         f'Your agent id is {agent_id!r}. '
         'Complete tasks already assigned to you; do not claim tasks assigned to others. '
         'Only claim an open (unassigned) task if it clearly matches your role, one at a time.\n'
+        'You may send_message to teammates (or broadcast with to="*") and list_messages.\n'
         'Work only on the tasks listed under "Tasks assigned to you" below.\n'
         f'Tasks assigned to you:\n{mine}\n'
-        f'Full board:\n{_format_board(board)}'
+        f'Full board:\n{_format_board(board)}\n'
+        f'Messages visible to you:\n{_format_messages(board, agent_id=agent_id)}'
     )
 
 
@@ -127,6 +136,8 @@ class BoardDeps:
 
     board: TaskBoard
     agent_id: str
+    member_ids: tuple[str, ...]
+    emit: EmitFn | None = None
 
 
 @dataclass
@@ -140,7 +151,7 @@ class CollaborativeRun:
     max_replans: int
     max_assignments_per_tick: int | None
     dispatch_mode: DispatchMode
-    run_member: Callable[[AnyAgent, str, TaskBoard, RunUsage], Awaitable[None]]
+    run_member: RunMemberFn
     user_prompt: str
     _usage: RunUsage
     _board: TaskBoard = field(default_factory=TaskBoard)
@@ -219,7 +230,12 @@ class CollaborativeRun:
             await self._events.put(None)
 
     async def _drive_phased(self) -> None:
-        lead_deps = BoardDeps(board=self._board, agent_id=_agent_id(self.leader, fallback='leader'))
+        lead_deps = BoardDeps(
+            board=self._board,
+            agent_id=_agent_id(self.leader, fallback='leader'),
+            member_ids=tuple(self.member_ids),
+            emit=self._emit,
+        )
         leader_id = _agent_id(self.leader, fallback='leader')
 
         seed = TeamTask(kind='seed', agent_id=leader_id)
@@ -285,14 +301,22 @@ class CollaborativeRun:
             await self._emit(TasksScheduled(scheduled))
             with team_span('collaborative.round', round=rounds + 1, max_rounds=self.max_rounds):
                 await asyncio.gather(
-                    *[self.run_member(member, self.user_prompt, self._board, self._usage) for member in self.members]
+                    *[
+                        self.run_member(member, self.user_prompt, self._board, self._usage, self._emit)
+                        for member in self.members
+                    ]
                 )
             for task in scheduled:
                 await self._emit(TaskCompleted(task))
             rounds += 1
 
     async def _drive_streaming(self) -> None:
-        lead_deps = BoardDeps(board=self._board, agent_id=_agent_id(self.leader, fallback='leader'))
+        lead_deps = BoardDeps(
+            board=self._board,
+            agent_id=_agent_id(self.leader, fallback='leader'),
+            member_ids=tuple(self.member_ids),
+            emit=self._emit,
+        )
         members_by_id = {
             _agent_id(member, fallback=f'member-{index}'): member for index, member in enumerate(self.members)
         }
@@ -323,7 +347,8 @@ class CollaborativeRun:
         with team_span('collaborative.synthesize'):
             synthesis_prompt = (
                 f'Synthesize a final answer for the goal: {self.user_prompt}\n'
-                f'Completed board:\n{_format_board(self._board)}'
+                f'Completed board:\n{_format_board(self._board)}\n'
+                f'Messages:\n{_format_messages(self._board)}'
             )
             # Board tools stay registered on the leader; strip them for this cycle only.
             with self.leader.override(
@@ -357,7 +382,7 @@ class _StreamingDispatch:
     run_usage: RunUsage
     board: TaskBoard
     lead_deps: BoardDeps
-    run_member: Callable[[AnyAgent, str, TaskBoard, RunUsage], Awaitable[None]]
+    run_member: RunMemberFn
     emit: EmitFn
     inflight: set[str] = field(default_factory=lambda: set[str]())
     tick_counts: dict[str, int] = field(default_factory=lambda: dict[str, int]())
@@ -504,7 +529,7 @@ class _StreamingDispatch:
         team_task = self._pending_team_tasks[agent_id]
         try:
             with team_span('collaborative.member_tick', agent_id=agent_id):
-                await self.run_member(member, self.user_prompt, self.board, self.run_usage)
+                await self.run_member(member, self.user_prompt, self.board, self.run_usage, self.emit)
         finally:
             self.inflight.discard(agent_id)
             await self.emit(TaskCompleted(team_task))
@@ -539,8 +564,8 @@ class CollaborativeTeam(BaseTeam[object]):
 
     The leader creates and assigns tasks by role; members complete their assigned work
     in parallel (phased rounds or streaming dispatch). When the board remains incomplete,
-    the leader may replan (up to ``max_replans``) before synthesizing. Peer messaging is
-    not included.
+    the leader may replan (up to ``max_replans``) before synthesizing. Members may
+    message each other directly via board tools (``send_message`` / ``list_messages``).
     """
 
     def __init__(
@@ -664,9 +689,15 @@ class CollaborativeTeam(BaseTeam[object]):
         user_prompt: str,
         board: TaskBoard,
         usage: RunUsage,
+        emit: EmitFn,
     ) -> None:
         agent_id = _agent_id(member, fallback='member')
-        deps = BoardDeps(board=board, agent_id=agent_id)
+        deps = BoardDeps(
+            board=board,
+            agent_id=agent_id,
+            member_ids=tuple(self._member_ids),
+            emit=emit,
+        )
         prompt = member_work_prompt(
             user_prompt,
             agent_id,
@@ -719,6 +750,21 @@ def _format_board(board: TaskBoard) -> str:
         for task in board.snapshot()
     ]
     return '\n'.join(lines) if lines else '(empty)'
+
+
+def _format_messages(board: TaskBoard, *, agent_id: str | None = None) -> str:
+    messages = board.messages_snapshot()
+    if agent_id is not None:
+        messages = [
+            message for message in messages if message.to == agent_id or message.to == '*' or message.sender == agent_id
+        ]
+    if not messages:
+        return '(none)'
+    lines: list[str] = []
+    for message in messages:
+        task_bit = f' task={message.task_id}' if message.task_id else ''
+        lines.append(f'- {message.id} {message.sender}->{message.to}{task_bit}: {message.body}')
+    return '\n'.join(lines)
 
 
 def _board_deps(ctx: RunContext[object]) -> BoardDeps:
@@ -782,13 +828,54 @@ async def complete_task(ctx: RunContext[object], task_id: str, result: str) -> s
     return f'Completed {task.id} with result={task.result!r}'
 
 
+async def send_message(ctx: RunContext[object], to: str, body: str, task_id: str = '') -> str:
+    """Send a direct or broadcast message to teammates (members only)."""
+    deps = _board_deps(ctx)
+    recipient = to.strip()
+    if not recipient:
+        return 'Error: to must be a teammate id or "*"'
+    if recipient == deps.agent_id:
+        return 'Error: cannot send a message to yourself'
+    if recipient != '*' and recipient not in deps.member_ids:
+        return f'Error: unknown teammate {recipient!r}; use one of {list(deps.member_ids)} or "*"'
+    link = task_id.strip() or None
+    try:
+        message = await deps.board.post_message(deps.agent_id, recipient, body, task_id=link)
+    except TaskBoardError as exc:
+        return f'Error: {exc}'
+    if deps.emit is not None:
+        await deps.emit(MessagePosted(message))
+    return f'Sent {message.id} to {message.to}'
+
+
+async def list_messages(ctx: RunContext[object]) -> str:
+    """List peer messages visible to you (members) or the full log (leader)."""
+    deps = _board_deps(ctx)
+    if deps.agent_id in deps.member_ids:
+        messages = await deps.board.list_messages(agent_id=deps.agent_id)
+    else:
+        messages = await deps.board.list_messages()
+    if not messages:
+        return 'No messages'
+    return '\n'.join(
+        (
+            f'{message.id} {message.sender}->{message.to}'
+            f'{f" task={message.task_id}" if message.task_id else ""}: {message.body}'
+        )
+        for message in messages
+    )
+
+
 def _register_leader_tools(agent: AnyAgent) -> None:
     agent.tool(add_task)
     agent.tool(assign_task)
     agent.tool(list_tasks)
+    agent.tool(list_messages)
 
 
 def _register_member_tools(agent: AnyAgent) -> None:
     agent.tool(list_tasks)
     agent.tool(claim_task)
     agent.tool(complete_task)
+    agent.tool(send_message)
+    agent.tool(list_messages)
