@@ -4,4 +4,4 @@ import pydantic_team
 
 
 def test_package_version() -> None:
-    assert pydantic_team.__version__ == '0.3.0'
+    assert pydantic_team.__version__ == '0.4.0'
