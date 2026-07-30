@@ -168,6 +168,7 @@ print locally without auth; set `LOGFIRE_TOKEN` or run `logfire auth` for cloud.
 uv sync --group examples
 uv run examples/hierarchical_basic.py
 uv run examples/collaborative_basic.py
+uv run examples/collaborative_review.py
 # one-shot without a prior sync:
 # uv run --group examples examples/hierarchical_basic.py
 ```

@@ -14,23 +14,13 @@ per-member chat thread.
 - [`CollaborativeTeam`](collaborative.md) — shared board, assign-by-role, replan, phased/streaming
   dispatch, peer `send_message` / `list_messages`, `iter` / typed events
 - OpenTelemetry via [`instrument_pydantic_team`](index.md#observability)
+- Opt-in Collaborative review gate (`require_review` / `assign_reviewer`,
+  `approve_task` / `reject_task`, `pending_review` → `done` or `needs_revision`,
+  [`TaskReviewDecided`](api.md) events) — see [Collaborative teams](collaborative.md)
 
 ## Next
 
 Highest-value gaps already called out in the docs:
-
-### Per-task approve/reject and reviewer delegation
-
-Today a member can mark a task `done` with no quality gate.
-
-Intended direction:
-
-- Review before a task counts as accepted `done`
-- Leader can **delegate review** to a member/role (`assign_reviewer` / default reviewer)
-- Reviewer tools such as `approve_task` / `reject_task(reason)`
-- On reject: task → `needs_revision` (same assignee); keep prior `result` and
-  `rejection_reason` on the board; next member tick is a fresh run that reads those
-  fields from the board (not LLM message history); rework then review again
 
 ### Collaborative Team of Teams
 

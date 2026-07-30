@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Docs roadmap page ([`docs/roadmap.md`](docs/roadmap.md)): Done / Next / Later /
   Non-goals, linked from Home, Collaborative guide, README, and MkDocs nav.
+- Opt-in Collaborative review gate: `CollaborativeTeam.require_review`, board
+  statuses `pending_review` / `needs_revision`, `Task.reviewer` /
+  `rejection_reason`, tools `assign_reviewer` / `approve_task` / `reject_task`,
+  and [`TaskReviewDecided`](pydantic_team/events.py) events. Default remains
+  `complete` → `done` when no reviewer is set. Example:
+  [`examples/collaborative_review.py`](examples/collaborative_review.py).
 
 ## [0.3.0] - 2026-07-29
 

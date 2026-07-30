@@ -17,9 +17,9 @@ v1 provides:
 
 Collaborative mode does **not** yet include a fully autonomous multi-agent “inbox”
 loop beyond board claim/assign rounds and peer `send_message` / `list_messages`.
-Members cannot create dependency-linked tasks; there is no per-task approve/reject
-gate yet; Collaborative members must be agents (not nested teams). See the
-[Roadmap](roadmap.md) for planned directions.
+Members cannot create dependency-linked tasks; Collaborative members must be agents
+(not nested teams). Per-task review is opt-in (`require_review` /
+`assign_reviewer`). See the [Roadmap](roadmap.md) for planned directions.
 
 For **sequential**, branching, or stateful pipelines, use
 [`pydantic-graph`](https://ai.pydantic.dev/graph/) instead of inventing another workflow type.
@@ -107,10 +107,13 @@ without provider SDKs. Sync the `examples` group to install
   — leader delegates to researcher / writer
 - [`examples/collaborative_basic.py`](https://github.com/etiqa/pydantic-team/blob/main/examples/collaborative_basic.py)
   — Sudoku team (leader + solver + verifier); pure reasoning, no custom tools
+- [`examples/collaborative_review.py`](https://github.com/etiqa/pydantic-team/blob/main/examples/collaborative_review.py)
+  — same Sudoku setup with `require_review=True` and reject → rework → approve
 
 ```bash
 # examples/.env with OPENAI_API_KEY is loaded automatically
 uv sync --group examples
 uv run examples/hierarchical_basic.py
 uv run examples/collaborative_basic.py
+uv run examples/collaborative_review.py
 ```

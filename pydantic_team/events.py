@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from typing import Literal
 
 from pydantic_team.base import TeamResult
-from pydantic_team.board import BoardMessage
+from pydantic_team.board import BoardMessage, Task
 
-TaskKind = Literal['seed', 'member_tick', 'replan', 'synthesize']
+TaskKind = Literal['seed', 'member_tick', 'replan', 'synthesize', 'review_tick']
 PhaseName = Literal['seed', 'members', 'replan']
+ReviewDecision = Literal['approved', 'rejected']
 
 
 @dataclass(frozen=True)
@@ -51,10 +52,18 @@ class MessagePosted:
 
 
 @dataclass(frozen=True)
+class TaskReviewDecided:
+    """A reviewer approved or rejected a board task."""
+
+    task: Task
+    decision: ReviewDecision
+
+
+@dataclass(frozen=True)
 class RunEnded:
     """The collaborative run finished with a final result."""
 
     result: TeamResult[object]
 
 
-TeamEvent = TasksScheduled | TaskCompleted | PhaseJoined | MessagePosted | RunEnded
+TeamEvent = TasksScheduled | TaskCompleted | PhaseJoined | MessagePosted | TaskReviewDecided | RunEnded
