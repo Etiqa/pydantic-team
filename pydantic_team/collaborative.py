@@ -19,6 +19,7 @@ from pydantic_team.events import (
     PhaseJoined,
     RunEnded,
     TaskCompleted,
+    TaskReviewDecided,
     TasksScheduled,
     TeamEvent,
     TeamTask,
@@ -40,6 +41,7 @@ def default_leader_instructions(member_ids: Sequence[str]) -> str:
         'assign_task each task to the most suitable teammate by role. '
         'Do not leave tasks open without an assignee. '
         'Teammates may message each other directly; use list_messages to observe. '
+        'Use assign_reviewer to delegate review; approve_task / reject_task for pending_review. '
         'When asked to synthesize, summarize completed task results and relevant messages.'
     )
 
@@ -103,30 +105,71 @@ def member_work_prompt(
     *,
     max_assignments: int | None = None,
 ) -> str:
-    """Per-member tick prompt: work assigned tasks only (no cross-role claim).
-
-    Args:
-        user_prompt: Team goal text.
-        agent_id: Member id whose assignments are listed.
-        board: Shared task board snapshot source.
-        max_assignments: If set, only the first N incomplete assignments are listed
-            for this tick (structural cap; not a soft prompt request).
-    """
+    """Per-member tick prompt: work assigned tasks and pending reviews."""
     assigned = _incomplete_assignments(board, agent_id, max_assignments=max_assignments)
     if assigned:
-        mine = '\n'.join(f'- {task.id} [{task.status}] {task.title}' for task in assigned)
+        mine = '\n'.join(
+            (
+                f'- {task.id} [{task.status}] {task.title}'
+                + (
+                    f' prior_result={task.result!r} rejection={task.rejection_reason!r}'
+                    if task.status is TaskStatus.NEEDS_REVISION
+                    else ''
+                )
+            )
+            for task in assigned
+        )
     else:
         mine = '(none)'
+    reviews = _pending_reviews(board, agent_id)
+    if reviews:
+        review_lines = '\n'.join(
+            f'- {task.id} [{task.status}] {task.title} result={task.result!r} assignee={task.assignee!r}'
+            for task in reviews
+        )
+    else:
+        review_lines = '(none)'
     return (
         f'Team goal: {user_prompt}\n'
         f'Your agent id is {agent_id!r}. '
         'Complete tasks already assigned to you; do not claim tasks assigned to others. '
         'Only claim an open (unassigned) task if it clearly matches your role, one at a time.\n'
+        'If you are the reviewer on pending_review tasks, use approve_task or reject_task(reason).\n'
         'You may send_message to teammates (or broadcast with to="*") and list_messages.\n'
         'Work only on the tasks listed under "Tasks assigned to you" below.\n'
         f'Tasks assigned to you:\n{mine}\n'
+        f'Tasks awaiting your review:\n{review_lines}\n'
         f'Full board:\n{_format_board(board)}\n'
         f'Messages visible to you:\n{_format_messages(board, agent_id=agent_id)}'
+    )
+
+
+def review_work_prompt(user_prompt: str, agent_id: str, board: TaskBoard) -> str:
+    """Prompt for a review-only tick (typically the leader as default reviewer)."""
+    reviews = _pending_reviews(board, agent_id)
+    if reviews:
+        review_lines = '\n'.join(
+            f'- {task.id} [{task.status}] {task.title} result={task.result!r} assignee={task.assignee!r}'
+            for task in reviews
+        )
+    else:
+        review_lines = '(none)'
+    return (
+        f'Team goal: {user_prompt}\n'
+        f'Your agent id is {agent_id!r}. '
+        'Review pending_review tasks: approve_task if acceptable, or reject_task with a clear reason.\n'
+        f'Tasks awaiting your review:\n{review_lines}\n'
+        f'Full board:\n{_format_board(board)}\n'
+        f'Messages:\n{_format_messages(board)}'
+    )
+
+
+def review_leader_instructions() -> str:
+    """Instructions for a toolless-except-review leader cycle."""
+    return (
+        'You are reviewing teammate work on the shared board. '
+        'Use approve_task or reject_task on pending_review items only. '
+        'Do not create or assign tasks in this cycle.'
     )
 
 
@@ -137,7 +180,9 @@ class BoardDeps:
     board: TaskBoard
     agent_id: str
     member_ids: tuple[str, ...]
+    leader_id: str = 'leader'
     emit: EmitFn | None = None
+    require_review: bool = False
 
 
 @dataclass
@@ -153,6 +198,7 @@ class CollaborativeRun:
     dispatch_mode: DispatchMode
     run_member: RunMemberFn
     user_prompt: str
+    require_review: bool
     _usage: RunUsage
     _board: TaskBoard = field(default_factory=TaskBoard)
     _events: asyncio.Queue[TeamEvent | None] = field(default_factory=lambda: asyncio.Queue[TeamEvent | None]())
@@ -230,13 +276,15 @@ class CollaborativeRun:
             await self._events.put(None)
 
     async def _drive_phased(self) -> None:
+        leader_id = _agent_id(self.leader, fallback='leader')
         lead_deps = BoardDeps(
             board=self._board,
-            agent_id=_agent_id(self.leader, fallback='leader'),
+            agent_id=leader_id,
             member_ids=tuple(self.member_ids),
+            leader_id=leader_id,
             emit=self._emit,
+            require_review=self.require_review,
         )
-        leader_id = _agent_id(self.leader, fallback='leader')
 
         seed = TeamTask(kind='seed', agent_id=leader_id)
         await self._emit(TasksScheduled((seed,)))
@@ -259,7 +307,7 @@ class CollaborativeRun:
 
         replans_used = 0
         while True:
-            await self._run_phased_member_rounds()
+            await self._run_phased_member_rounds(lead_deps, leader_id)
             await self._emit(PhaseJoined(phase='members', incomplete=not self._board.is_complete()))
             if self._board.is_complete() or replans_used >= self.max_replans:
                 break
@@ -283,14 +331,14 @@ class CollaborativeRun:
 
         await self._synthesize(lead_deps, leader_id)
 
-    async def _run_phased_member_rounds(self) -> None:
+    async def _run_phased_member_rounds(self, lead_deps: BoardDeps, leader_id: str) -> None:
         rounds = 0
         while rounds < self.max_rounds and not self._board.is_complete():
             scheduled = tuple(
                 TeamTask(
                     kind='member_tick',
                     agent_id=_agent_id(member, fallback=f'member-{index}'),
-                    task_ids=_assignment_ids(
+                    task_ids=_tick_task_ids(
                         self._board,
                         _agent_id(member, fallback=f'member-{index}'),
                         max_assignments=self.max_assignments_per_tick,
@@ -308,14 +356,41 @@ class CollaborativeRun:
                 )
             for task in scheduled:
                 await self._emit(TaskCompleted(task))
+            await self._run_leader_review_tick(lead_deps, leader_id)
             rounds += 1
 
+    async def _run_leader_review_tick(self, lead_deps: BoardDeps, leader_id: str) -> None:
+        """Run one leader review cycle when the leader has pending_review work."""
+        if not _pending_reviews(self._board, leader_id):
+            return
+        review = TeamTask(
+            kind='review_tick',
+            agent_id=leader_id,
+            task_ids=tuple(task.id for task in _pending_reviews(self._board, leader_id)),
+        )
+        await self._emit(TasksScheduled((review,)))
+        with team_span('collaborative.review_tick', agent_id=leader_id):
+            with self.leader.override(instructions=review_leader_instructions()):
+                try:
+                    await _run_agent_cycle(
+                        self.leader,
+                        review_work_prompt(self.user_prompt, leader_id, self._board),
+                        deps=lead_deps,
+                        team_usage=self._usage,
+                    )
+                except UnexpectedModelBehavior:
+                    pass
+        await self._emit(TaskCompleted(review))
+
     async def _drive_streaming(self) -> None:
+        leader_id = _agent_id(self.leader, fallback='leader')
         lead_deps = BoardDeps(
             board=self._board,
-            agent_id=_agent_id(self.leader, fallback='leader'),
+            agent_id=leader_id,
             member_ids=tuple(self.member_ids),
+            leader_id=leader_id,
             emit=self._emit,
+            require_review=self.require_review,
         )
         members_by_id = {
             _agent_id(member, fallback=f'member-{index}'): member for index, member in enumerate(self.members)
@@ -333,13 +408,14 @@ class CollaborativeRun:
             lead_deps=lead_deps,
             run_member=self.run_member,
             emit=self._emit,
+            require_review=self.require_review,
         )
         early = await dispatch.run()
         if early is not None:
             self._result = early
             await self._emit(RunEnded(early))
             return
-        await self._synthesize(lead_deps, _agent_id(self.leader, fallback='leader'))
+        await self._synthesize(lead_deps, leader_id)
 
     async def _synthesize(self, lead_deps: BoardDeps, leader_id: str) -> None:
         synth = TeamTask(kind='synthesize', agent_id=leader_id)
@@ -384,6 +460,7 @@ class _StreamingDispatch:
     lead_deps: BoardDeps
     run_member: RunMemberFn
     emit: EmitFn
+    require_review: bool = False
     inflight: set[str] = field(default_factory=lambda: set[str]())
     tick_counts: dict[str, int] = field(default_factory=lambda: dict[str, int]())
     member_tasks: set[asyncio.Task[None]] = field(default_factory=lambda: set[asyncio.Task[None]]())
@@ -392,8 +469,10 @@ class _StreamingDispatch:
     replans_used: int = 0
     replan_started: bool = False
     leader_task: asyncio.Task[object] | None = None
+    leader_review_ticks: int = 0
     _pending_team_tasks: dict[str, TeamTask] = field(default_factory=lambda: dict[str, TeamTask]())
     _members_joined: bool = False
+    _leader_review_inflight: bool = False
 
     def __post_init__(self) -> None:
         self.tick_counts = {agent_id: 0 for agent_id in self.members_by_id}
@@ -433,8 +512,9 @@ class _StreamingDispatch:
 
             leader_running = await self._collect_finished_leader(seed)
             await self._spawn_ready_members(leader_running=leader_running)
+            await self._spawn_leader_review_if_ready(leader_running=leader_running)
 
-            if leader_running or self.inflight:
+            if leader_running or self.inflight or self._leader_review_inflight:
                 await self._wait_for_progress()
                 continue
 
@@ -447,6 +527,7 @@ class _StreamingDispatch:
             self.replans_used += 1
             self.replan_started = True
             self._members_joined = False
+            self.leader_review_ticks = 0
             for agent_id in self.tick_counts:
                 self.tick_counts[agent_id] = 0
             replan = TeamTask(kind='replan', agent_id=leader_id)
@@ -484,10 +565,50 @@ class _StreamingDispatch:
             await self.emit(PhaseJoined(phase='replan', incomplete=not self.board.is_complete()))
 
     def _member_has_incomplete_work(self, agent_id: str) -> bool:
-        return any(task.assignee == agent_id and task.status is not TaskStatus.DONE for task in self.board.snapshot())
+        return bool(_incomplete_assignments(self.board, agent_id, max_assignments=None)) or bool(
+            _pending_reviews(self.board, agent_id)
+        )
 
     def _board_has_open_tasks(self) -> bool:
         return any(task.status is TaskStatus.OPEN for task in self.board.snapshot())
+
+    async def _spawn_leader_review_if_ready(self, *, leader_running: bool) -> None:
+        if leader_running or self._leader_review_inflight or self.leader_task is not None:
+            return
+        leader_id = _agent_id(self.leader, fallback='leader')
+        if not _pending_reviews(self.board, leader_id):
+            return
+        if self.leader_review_ticks >= self.max_rounds:
+            return
+        self.leader_review_ticks += 1
+        self._leader_review_inflight = True
+        self.had_tasks = True
+        review = TeamTask(
+            kind='review_tick',
+            agent_id=leader_id,
+            task_ids=tuple(task.id for task in _pending_reviews(self.board, leader_id)),
+        )
+        await self.emit(TasksScheduled((review,)))
+        self.leader_task = asyncio.create_task(self._leader_review(review))
+
+    async def _leader_review(self, review_task: TeamTask) -> None:
+        leader_id = _agent_id(self.leader, fallback='leader')
+        try:
+            with team_span('collaborative.review_tick', agent_id=leader_id):
+                with self.leader.override(instructions=review_leader_instructions()):
+                    try:
+                        await _run_agent_cycle(
+                            self.leader,
+                            review_work_prompt(self.user_prompt, leader_id, self.board),
+                            deps=self.lead_deps,
+                            team_usage=self.run_usage,
+                        )
+                    except UnexpectedModelBehavior:
+                        pass
+        finally:
+            self._leader_review_inflight = False
+            await self.emit(TaskCompleted(review_task))
+            self.board.signal_wakeup()
 
     async def _collect_finished_leader(self, seed_task: TeamTask) -> bool:
         leader_running = self.leader_task is not None and not self.leader_task.done()
@@ -519,7 +640,7 @@ class _StreamingDispatch:
             team_task = TeamTask(
                 kind='member_tick',
                 agent_id=agent_id,
-                task_ids=_assignment_ids(self.board, agent_id, max_assignments=self.max_assignments_per_tick),
+                task_ids=_tick_task_ids(self.board, agent_id, max_assignments=self.max_assignments_per_tick),
             )
             self._pending_team_tasks[agent_id] = team_task
             await self.emit(TasksScheduled((team_task,)))
@@ -580,6 +701,7 @@ class CollaborativeTeam(BaseTeam[object]):
         max_replans: int = 0,
         max_assignments_per_tick: int | None = None,
         dispatch_mode: DispatchMode = 'phased',
+        require_review: bool = False,
     ) -> None:
         """Create a collaborative team.
 
@@ -597,6 +719,9 @@ class CollaborativeTeam(BaseTeam[object]):
                 assignments (caps work per round without relying on soft prompt wording).
             dispatch_mode: ``phased`` (default) runs seed then member rounds; ``streaming``
                 starts member ticks as soon as tasks are assigned (overlap with seed/replan).
+            require_review: When True, new tasks get ``reviewer=leader`` so ``complete`` goes
+                to ``pending_review`` until approve/reject. When False, tasks complete to
+                ``done`` unless ``assign_reviewer`` sets a reviewer.
         """
         if leader_agent is not None and leader_model is not None:
             raise ValueError('Provide leader_agent or leader_model, not both')
@@ -618,6 +743,7 @@ class CollaborativeTeam(BaseTeam[object]):
         self._max_replans = max_replans
         self._max_assignments_per_tick = max_assignments_per_tick
         self._dispatch_mode: DispatchMode = dispatch_mode
+        self._require_review = require_review
         self._members: list[AnyAgent] = list(members)
         self._member_ids: list[str] = [
             _agent_id(member, fallback=f'member-{index}') for index, member in enumerate(self._members)
@@ -673,6 +799,7 @@ class CollaborativeTeam(BaseTeam[object]):
             dispatch_mode=self._dispatch_mode,
             run_member=self._run_member,
             user_prompt=user_prompt,
+            require_review=self._require_review,
             _usage=usage or RunUsage(),
         )
 
@@ -692,11 +819,14 @@ class CollaborativeTeam(BaseTeam[object]):
         emit: EmitFn,
     ) -> None:
         agent_id = _agent_id(member, fallback='member')
+        leader_id = _agent_id(self._leader, fallback='leader')
         deps = BoardDeps(
             board=board,
             agent_id=agent_id,
             member_ids=tuple(self._member_ids),
+            leader_id=leader_id,
             emit=emit,
+            require_review=self._require_review,
         )
         prompt = member_work_prompt(
             user_prompt,
@@ -722,19 +852,31 @@ def _incomplete_assignments(
     *,
     max_assignments: int | None,
 ) -> list[Task]:
-    assigned = [task for task in board.snapshot() if task.assignee == agent_id and task.status is not TaskStatus.DONE]
+    assigned = [
+        task
+        for task in board.snapshot()
+        if task.assignee == agent_id and task.status in (TaskStatus.CLAIMED, TaskStatus.NEEDS_REVISION)
+    ]
     if max_assignments is not None:
         return assigned[:max_assignments]
     return assigned
 
 
-def _assignment_ids(
+def _pending_reviews(board: TaskBoard, reviewer_id: str) -> list[Task]:
+    return [
+        task for task in board.snapshot() if task.reviewer == reviewer_id and task.status is TaskStatus.PENDING_REVIEW
+    ]
+
+
+def _tick_task_ids(
     board: TaskBoard,
     agent_id: str,
     *,
     max_assignments: int | None,
 ) -> tuple[str, ...]:
-    return tuple(task.id for task in _incomplete_assignments(board, agent_id, max_assignments=max_assignments))
+    assigned = _incomplete_assignments(board, agent_id, max_assignments=max_assignments)
+    reviews = _pending_reviews(board, agent_id)
+    return tuple(task.id for task in assigned) + tuple(task.id for task in reviews)
 
 
 def _agent_id(agent: AnyAgent, *, fallback: str) -> str:
@@ -746,7 +888,11 @@ def _agent_id(agent: AnyAgent, *, fallback: str) -> str:
 
 def _format_board(board: TaskBoard) -> str:
     lines = [
-        f'- {task.id} [{task.status}] {task.title} (assignee={task.assignee!r}) result={task.result!r}'
+        (
+            f'- {task.id} [{task.status}] {task.title} '
+            f'(assignee={task.assignee!r} reviewer={task.reviewer!r}) '
+            f'result={task.result!r} rejection={task.rejection_reason!r}'
+        )
         for task in board.snapshot()
     ]
     return '\n'.join(lines) if lines else '(empty)'
@@ -777,7 +923,10 @@ def _board_deps(ctx: RunContext[object]) -> BoardDeps:
 async def add_task(ctx: RunContext[object], title: str, description: str = '') -> str:
     """Add an open task to the shared board."""
     deps = _board_deps(ctx)
-    task = await deps.board.add_task(title, description)
+    reviewer = deps.leader_id if deps.require_review else None
+    task = await deps.board.add_task(title, description, reviewer=reviewer)
+    if reviewer is not None:
+        return f'Created {task.id}: {task.title} (reviewer={reviewer})'
     return f'Created {task.id}: {task.title}'
 
 
@@ -791,20 +940,38 @@ async def assign_task(ctx: RunContext[object], task_id: str, agent_id: str) -> s
     return f'Assigned {task.id} to {task.assignee}'
 
 
+async def assign_reviewer(ctx: RunContext[object], task_id: str, reviewer_id: str) -> str:
+    """Set the reviewer for a task (leader or teammate id)."""
+    deps = _board_deps(ctx)
+    rid = reviewer_id.strip()
+    allowed = {deps.leader_id, *deps.member_ids}
+    if rid not in allowed:
+        return f'Error: unknown reviewer {rid!r}; use one of {sorted(allowed)}'
+    try:
+        task = await deps.board.assign_reviewer(task_id, rid)
+    except TaskBoardError as exc:
+        return f'Error: {exc}'
+    return f'Reviewer for {task.id} set to {task.reviewer}'
+
+
 async def list_tasks(ctx: RunContext[object], status: str | None = None) -> str:
-    """List tasks on the board; optional status filter: open, claimed, done."""
+    """List tasks; optional status: open, claimed, pending_review, needs_revision, done."""
     deps = _board_deps(ctx)
     filter_status: TaskStatus | None = None
     if status is not None and status.strip():
         try:
             filter_status = TaskStatus(status.strip().lower())
         except ValueError:
-            return f'Error: invalid status {status!r}; use open, claimed, or done'
+            return f'Error: invalid status {status!r}; use open, claimed, pending_review, needs_revision, or done'
     tasks = await deps.board.list_tasks(status=filter_status)
     if not tasks:
         return 'No tasks'
     return '\n'.join(
-        f'{task.id} [{task.status}] {task.title} assignee={task.assignee!r} result={task.result!r}' for task in tasks
+        (
+            f'{task.id} [{task.status}] {task.title} assignee={task.assignee!r} '
+            f'reviewer={task.reviewer!r} result={task.result!r} rejection={task.rejection_reason!r}'
+        )
+        for task in tasks
     )
 
 
@@ -819,13 +986,39 @@ async def claim_task(ctx: RunContext[object], task_id: str) -> str:
 
 
 async def complete_task(ctx: RunContext[object], task_id: str, result: str) -> str:
-    """Mark a task you claimed as done, with a short result."""
+    """Submit completed work (done, or pending_review when a reviewer is set)."""
     deps = _board_deps(ctx)
     try:
         task = await deps.board.complete(task_id, result=result, agent_id=deps.agent_id)
     except TaskBoardError as exc:
         return f'Error: {exc}'
+    if task.status is TaskStatus.PENDING_REVIEW:
+        return f'Submitted {task.id} for review by {task.reviewer!r} with result={task.result!r}'
     return f'Completed {task.id} with result={task.result!r}'
+
+
+async def approve_task(ctx: RunContext[object], task_id: str) -> str:
+    """Approve a pending_review task (reviewer only)."""
+    deps = _board_deps(ctx)
+    try:
+        task = await deps.board.approve(task_id, agent_id=deps.agent_id)
+    except TaskBoardError as exc:
+        return f'Error: {exc}'
+    if deps.emit is not None:
+        await deps.emit(TaskReviewDecided(task, 'approved'))
+    return f'Approved {task.id}'
+
+
+async def reject_task(ctx: RunContext[object], task_id: str, reason: str) -> str:
+    """Reject a pending_review task with a reason (reviewer only)."""
+    deps = _board_deps(ctx)
+    try:
+        task = await deps.board.reject(task_id, reason=reason, agent_id=deps.agent_id)
+    except TaskBoardError as exc:
+        return f'Error: {exc}'
+    if deps.emit is not None:
+        await deps.emit(TaskReviewDecided(task, 'rejected'))
+    return f'Rejected {task.id}: {task.rejection_reason}'
 
 
 async def send_message(ctx: RunContext[object], to: str, body: str, task_id: str = '') -> str:
@@ -869,13 +1062,18 @@ async def list_messages(ctx: RunContext[object]) -> str:
 def _register_leader_tools(agent: AnyAgent) -> None:
     agent.tool(add_task)
     agent.tool(assign_task)
+    agent.tool(assign_reviewer)
     agent.tool(list_tasks)
     agent.tool(list_messages)
+    agent.tool(approve_task)
+    agent.tool(reject_task)
 
 
 def _register_member_tools(agent: AnyAgent) -> None:
     agent.tool(list_tasks)
     agent.tool(claim_task)
     agent.tool(complete_task)
+    agent.tool(approve_task)
+    agent.tool(reject_task)
     agent.tool(send_message)
     agent.tool(list_messages)

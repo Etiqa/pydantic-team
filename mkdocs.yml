@@ -45,6 +45,7 @@ nav:
   - Home: index.md
   - Hierarchical teams: hierarchical.md
   - Collaborative teams: collaborative.md
+  - Roadmap: roadmap.md
   - API reference: api.md
 
 markdown_extensions:

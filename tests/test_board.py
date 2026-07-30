@@ -196,3 +196,141 @@ async def test_signal_wakeup_wakes_waiter() -> None:
     board.signal_wakeup('solo')
     agents = await asyncio.wait_for(waiter, timeout=1)
     assert agents == {'solo'}
+
+
+async def test_complete_without_reviewer_goes_done() -> None:
+    board = TaskBoard()
+    task = await board.add_task('Plain')
+    await board.claim(task.id, 'alice')
+    done = await board.complete(task.id, result='ok', agent_id='alice')
+    assert done.status is TaskStatus.DONE
+    assert done.result == 'ok'
+    assert board.is_complete()
+
+
+async def test_complete_with_reviewer_goes_pending_review() -> None:
+    board = TaskBoard()
+    task = await board.add_task('Gated', reviewer='leader')
+    assert task.reviewer == 'leader'
+    await board.claim(task.id, 'alice')
+    pending = await board.complete(task.id, result='draft', agent_id='alice')
+    assert pending.status is TaskStatus.PENDING_REVIEW
+    assert pending.result == 'draft'
+    assert pending.rejection_reason is None
+    assert not board.is_complete()
+
+
+async def test_complete_with_reviewer_wakes_reviewer() -> None:
+    board = TaskBoard()
+    task = await board.add_task('Gated', reviewer='leader')
+    await board.claim(task.id, 'alice')
+    await board.wait_wakeup()
+    waiter = asyncio.create_task(board.wait_wakeup())
+    await asyncio.sleep(0)
+    await board.complete(task.id, result='draft', agent_id='alice')
+    agents = await asyncio.wait_for(waiter, timeout=1)
+    assert agents == {'leader'}
+
+
+async def test_approve_and_reject_review_flow() -> None:
+    board = TaskBoard()
+    task = await board.add_task('Revise me', reviewer='leader')
+    await board.claim(task.id, 'alice')
+    await board.complete(task.id, result='v1', agent_id='alice')
+    rejected = await board.reject(task.id, reason='too short', agent_id='leader')
+    assert rejected.status is TaskStatus.NEEDS_REVISION
+    assert rejected.result == 'v1'
+    assert rejected.rejection_reason == 'too short'
+    revised = await board.complete(task.id, result='v2 longer', agent_id='alice')
+    assert revised.status is TaskStatus.PENDING_REVIEW
+    assert revised.result == 'v2 longer'
+    assert revised.rejection_reason is None
+    with pytest.raises(TaskClaimError):
+        await board.approve(task.id, agent_id='alice')
+    approved = await board.approve(task.id, agent_id='leader')
+    assert approved.status is TaskStatus.DONE
+    assert board.is_complete()
+
+
+async def test_reject_requires_non_empty_reason() -> None:
+    board = TaskBoard()
+    task = await board.add_task('X', reviewer='leader')
+    await board.claim(task.id, 'alice')
+    await board.complete(task.id, result='v1', agent_id='alice')
+    with pytest.raises(TaskClaimError, match='reason'):
+        await board.reject(task.id, reason='  ', agent_id='leader')
+
+
+async def test_reject_wrong_reviewer_fails() -> None:
+    board = TaskBoard()
+    task = await board.add_task('X', reviewer='leader')
+    await board.claim(task.id, 'alice')
+    await board.complete(task.id, result='v1', agent_id='alice')
+    with pytest.raises(TaskClaimError):
+        await board.reject(task.id, reason='nope', agent_id='bob')
+
+
+async def test_approve_wrong_status_fails() -> None:
+    board = TaskBoard()
+    task = await board.add_task('X', reviewer='leader')
+    await board.claim(task.id, 'alice')
+    with pytest.raises(TaskClaimError):
+        await board.approve(task.id, agent_id='leader')
+
+
+async def test_assign_pending_review_fails() -> None:
+    board = TaskBoard()
+    task = await board.add_task('X', reviewer='leader')
+    await board.claim(task.id, 'alice')
+    await board.complete(task.id, result='v1', agent_id='alice')
+    with pytest.raises(TaskClaimError, match='pending review'):
+        await board.assign(task.id, 'bob')
+
+
+async def test_assign_reviewer_and_wakeup_when_pending() -> None:
+    board = TaskBoard()
+    task = await board.add_task('X', reviewer='leader')
+    await board.claim(task.id, 'alice')
+    await board.complete(task.id, result='v1', agent_id='alice')
+    await board.wait_wakeup()
+    waiter = asyncio.create_task(board.wait_wakeup())
+    await asyncio.sleep(0)
+    updated = await board.assign_reviewer(task.id, 'verifier')
+    assert updated.reviewer == 'verifier'
+    agents = await asyncio.wait_for(waiter, timeout=1)
+    assert agents == {'verifier'}
+
+
+async def test_reject_from_done_not_allowed() -> None:
+    board = TaskBoard()
+    task = await board.add_task('X')
+    await board.claim(task.id, 'alice')
+    await board.complete(task.id, result='ok', agent_id='alice')
+    with pytest.raises(TaskClaimError):
+        await board.reject(task.id, reason='too late', agent_id='leader')
+
+
+async def test_assign_reviewer_on_claimed_does_not_require_pending() -> None:
+    board = TaskBoard()
+    task = await board.add_task('X')
+    await board.claim(task.id, 'alice')
+    updated = await board.assign_reviewer(task.id, 'leader')
+    assert updated.reviewer == 'leader'
+    assert updated.status is TaskStatus.CLAIMED
+    assert board.snapshot()[0].reviewer == 'leader'
+
+
+async def test_assign_reviewer_on_done_fails() -> None:
+    board = TaskBoard()
+    task = await board.add_task('X')
+    await board.claim(task.id, 'alice')
+    await board.complete(task.id, result='ok', agent_id='alice')
+    with pytest.raises(TaskClaimError):
+        await board.assign_reviewer(task.id, 'leader')
+
+
+async def test_complete_open_task_fails() -> None:
+    board = TaskBoard()
+    task = await board.add_task('X')
+    with pytest.raises(TaskClaimError, match='not completable'):
+        await board.complete(task.id, result='x', agent_id='alice')

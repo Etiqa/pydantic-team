@@ -15,6 +15,7 @@ Public exports from [`pydantic_team`][pydantic_team].
         - TaskCompleted
         - PhaseJoined
         - MessagePosted
+        - TaskReviewDecided
         - RunEnded
         - TaskBoard
         - Task
@@ -62,5 +63,7 @@ Public exports from [`pydantic_team`][pydantic_team].
 ::: pydantic_team.events.PhaseJoined
 
 ::: pydantic_team.events.MessagePosted
+
+::: pydantic_team.events.TaskReviewDecided
 
 ::: pydantic_team.events.RunEnded

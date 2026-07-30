@@ -12,6 +12,8 @@ class TaskStatus(str, Enum):
 
     OPEN = 'open'
     CLAIMED = 'claimed'
+    PENDING_REVIEW = 'pending_review'
+    NEEDS_REVISION = 'needs_revision'
     DONE = 'done'
 
 
@@ -25,6 +27,8 @@ class Task:
     status: TaskStatus = TaskStatus.OPEN
     assignee: str | None = None
     result: str | None = None
+    reviewer: str | None = None
+    rejection_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,7 +51,7 @@ class TaskNotFoundError(TaskBoardError):
 
 
 class TaskClaimError(TaskBoardError):
-    """Raised when claim, assign, or complete is not allowed."""
+    """Raised when claim, assign, complete, or review is not allowed."""
 
 
 @dataclass
@@ -62,11 +66,22 @@ class TaskBoard:
     _wakeup: asyncio.Event = field(default_factory=asyncio.Event)
     _wakeup_agents: set[str] = field(default_factory=lambda: set[str]())
 
-    async def add_task(self, title: str, description: str = '') -> Task:
+    async def add_task(
+        self,
+        title: str,
+        description: str = '',
+        *,
+        reviewer: str | None = None,
+    ) -> Task:
         """Create an open task and return its snapshot."""
         async with self._lock:
             self._counter += 1
-            task = Task(id=f'task-{self._counter}', title=title, description=description)
+            task = Task(
+                id=f'task-{self._counter}',
+                title=title,
+                description=description,
+                reviewer=reviewer,
+            )
             self._tasks[task.id] = task
             return task
 
@@ -131,28 +146,94 @@ class TaskBoard:
         return updated
 
     async def assign(self, task_id: str, agent_id: str) -> Task:
-        """Force-assign a non-done task to `agent_id` (lead operation)."""
+        """Force-assign a non-done, non-pending-review task to `agent_id` (lead operation)."""
         async with self._lock:
             task = self._require(task_id)
             if task.status is TaskStatus.DONE:
                 raise TaskClaimError(f'task {task_id!r} is already done')
+            if task.status is TaskStatus.PENDING_REVIEW:
+                raise TaskClaimError(f'task {task_id!r} is pending review')
             updated = replace(task, status=TaskStatus.CLAIMED, assignee=agent_id)
             self._tasks[task_id] = updated
         self.signal_wakeup(agent_id)
         return updated
 
-    async def complete(self, task_id: str, *, result: str, agent_id: str) -> Task:
-        """Mark a claimed task done; only the assignee may complete it."""
+    async def assign_reviewer(self, task_id: str, reviewer_id: str) -> Task:
+        """Set or replace the reviewer on a non-done task."""
         async with self._lock:
             task = self._require(task_id)
-            if task.status is not TaskStatus.CLAIMED:
-                raise TaskClaimError(f'task {task_id!r} is not claimed (status={task.status})')
+            if task.status is TaskStatus.DONE:
+                raise TaskClaimError(f'task {task_id!r} is already done')
+            updated = replace(task, reviewer=reviewer_id)
+            self._tasks[task_id] = updated
+        if updated.status is TaskStatus.PENDING_REVIEW:
+            self.signal_wakeup(reviewer_id)
+        return updated
+
+    async def complete(self, task_id: str, *, result: str, agent_id: str) -> Task:
+        """Mark work submitted; gated tasks become pending_review, others done."""
+        async with self._lock:
+            task = self._require(task_id)
+            if task.status not in (TaskStatus.CLAIMED, TaskStatus.NEEDS_REVISION):
+                raise TaskClaimError(f'task {task_id!r} is not completable (status={task.status})')
             if task.assignee != agent_id:
                 raise TaskClaimError(f'task {task_id!r} is assigned to {task.assignee!r}, not {agent_id!r}')
-            updated = replace(task, status=TaskStatus.DONE, result=result)
+            if task.reviewer is not None:
+                updated = replace(
+                    task,
+                    status=TaskStatus.PENDING_REVIEW,
+                    result=result,
+                    rejection_reason=None,
+                )
+                self._tasks[task_id] = updated
+                wakeup_agent = task.reviewer
+            else:
+                updated = replace(
+                    task,
+                    status=TaskStatus.DONE,
+                    result=result,
+                    rejection_reason=None,
+                )
+                self._tasks[task_id] = updated
+                wakeup_agent = None
+        if wakeup_agent is not None:
+            self.signal_wakeup(wakeup_agent)
+        else:
+            self.signal_wakeup()
+        return updated
+
+    async def approve(self, task_id: str, *, agent_id: str) -> Task:
+        """Accept a pending_review task; only the reviewer may approve."""
+        async with self._lock:
+            task = self._require(task_id)
+            if task.status is not TaskStatus.PENDING_REVIEW:
+                raise TaskClaimError(f'task {task_id!r} is not pending review (status={task.status})')
+            if task.reviewer != agent_id:
+                raise TaskClaimError(f'task {task_id!r} reviewer is {task.reviewer!r}, not {agent_id!r}')
+            updated = replace(task, status=TaskStatus.DONE, rejection_reason=None)
             self._tasks[task_id] = updated
-        # Wake the scheduler so it can drain, replan, or synthesize.
         self.signal_wakeup()
+        return updated
+
+    async def reject(self, task_id: str, *, reason: str, agent_id: str) -> Task:
+        """Reject a pending_review task back to needs_revision; reason required."""
+        cleaned = reason.strip()
+        if not cleaned:
+            raise TaskClaimError('rejection reason must be non-empty')
+        async with self._lock:
+            task = self._require(task_id)
+            if task.status is not TaskStatus.PENDING_REVIEW:
+                raise TaskClaimError(f'task {task_id!r} is not pending review (status={task.status})')
+            if task.reviewer != agent_id:
+                raise TaskClaimError(f'task {task_id!r} reviewer is {task.reviewer!r}, not {agent_id!r}')
+            updated = replace(
+                task,
+                status=TaskStatus.NEEDS_REVISION,
+                rejection_reason=cleaned,
+            )
+            self._tasks[task_id] = updated
+            assignee = task.assignee
+        self.signal_wakeup(assignee)
         return updated
 
     def is_complete(self) -> bool:

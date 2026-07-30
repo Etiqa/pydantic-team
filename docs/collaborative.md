@@ -18,8 +18,15 @@ synthesizes), collaborative mode:
 
 Members may **message each other directly** (`send_message` / `list_messages`) without
 routing through the leader. The leader can **observe** messages with `list_messages`
-during seed/replan. Members cannot create sub-tasks in this version. There is no
-per-task approve/reject gate yet.
+during seed/replan. Members cannot create dependency-linked tasks in this version;
+nested teams are not supported as members. See the [Roadmap](roadmap.md) for planned
+directions.
+
+**Review (opt-in):** with `require_review=True`, new tasks stamp `reviewer` to the
+leader; `complete` moves them to `pending_review` until `approve_task` /
+`reject_task`. Use `assign_reviewer` to gate a single task (even when the flag is
+off) or to delegate review to a member. Rejected work goes to `needs_revision` with
+`rejection_reason` kept on the board; `done` is terminal.
 
 ```mermaid
 flowchart TD
@@ -43,7 +50,14 @@ For step-by-step observation (inspired by [pydantic-graph](https://ai.pydantic.d
 `iter`, without modeling the team as a GraphBuilder):
 
 ```python
-from pydantic_team import CollaborativeTeam, MessagePosted, PhaseJoined, RunEnded, TasksScheduled
+from pydantic_team import (
+    CollaborativeTeam,
+    MessagePosted,
+    PhaseJoined,
+    RunEnded,
+    TaskReviewDecided,
+    TasksScheduled,
+)
 
 async with team.iter('Produce a short report') as run:
     async for event in run:
@@ -51,6 +65,8 @@ async with team.iter('Produce a short report') as run:
             print('scheduled', [t.kind for t in event.tasks])
         elif isinstance(event, MessagePosted):
             print('message', event.message.sender, '->', event.message.to)
+        elif isinstance(event, TaskReviewDecided):
+            print('review', event.decision, event.task.id)
         elif isinstance(event, PhaseJoined):
             print('joined', event.phase, 'incomplete=', event.incomplete)
         elif isinstance(event, RunEnded):
@@ -58,9 +74,9 @@ async with team.iter('Produce a short report') as run:
     assert run.result is not None
 ```
 
-Events: `TasksScheduled`, `TaskCompleted`, `PhaseJoined`, `MessagePosted`, `RunEnded`
-(see [`TeamTask`][pydantic_team.events.TeamTask]). Use `run.board` for a live snapshot
-(including `messages_snapshot()`).
+Events: `TasksScheduled`, `TaskCompleted`, `PhaseJoined`, `MessagePosted`,
+`TaskReviewDecided`, `RunEnded` (see [`TeamTask`][pydantic_team.events.TeamTask]).
+Use `run.board` for a live snapshot (including `messages_snapshot()`).
 
 ## Construction
 
@@ -88,6 +104,7 @@ team = CollaborativeTeam(
     max_rounds=3,
     max_replans=2,
     dispatch_mode='streaming',  # members start on assign; default is 'phased'
+    # require_review=True,  # stamp reviewer=leader; complete → pending_review
 )
 result = await team.run('Produce a short report on agent teams')
 print(result.data)
@@ -102,7 +119,10 @@ print(result.usage)
   (default `0` = seed → work → synthesize only)
 - `max_assignments_per_tick`: optional cap on how many incomplete assignments are listed
   for a member in one tick (forces leftover work into later ticks / replan)
-- Members must be agents (nested teams are not supported in this slice)
+- `require_review`: when `True`, new tasks get `reviewer=leader` so `complete` goes to
+  `pending_review` until approve/reject; when `False` (default), `complete` → `done`
+  unless `assign_reviewer` set a reviewer on that task
+- Members must be agents (nested teams are not supported in this slice; see [Roadmap](roadmap.md))
 - Pass `usage=` as a team-level aggregate: each seed / replan / synthesize / member
   tick is an isolated `agent.run` with its own usage budget (so the default
   `request_limit` applies per cycle), then folded into the aggregate
@@ -112,9 +132,9 @@ print(result.usage)
 
 | Who | Tools |
 |-----|--------|
-| Lead (seed / replan) | `add_task`, `assign_task`, `list_tasks`, `list_messages` |
+| Lead (seed / replan) | `add_task`, `assign_task`, `assign_reviewer`, `approve_task`, `reject_task`, `list_tasks`, `list_messages` |
 | Lead (synthesize) | none — final answer only (board + messages in prompt) |
-| Members | `list_tasks`, `claim_task`, `complete_task`, `send_message`, `list_messages` |
+| Members | `list_tasks`, `claim_task`, `complete_task`, `assign_reviewer`, `approve_task`, `reject_task`, `send_message`, `list_messages` |
 
 `send_message(to, body, task_id='')` posts a peer DM (`to` = teammate id) or broadcast
 (`to='*'`). Optional `task_id` links the message to an existing task. Direct messages
@@ -124,8 +144,8 @@ After `assign_task`, the task is `claimed` for that assignee (not stealable via 
 Claim remains for residual `open` tasks only.
 
 Orchestration phases (`collaborative.run` / `.seed` / `.round` / `.replan` /
-`.synthesize`, plus `.dispatch` / `.member_tick` in streaming mode) emit OpenTelemetry
-spans when
+`.synthesize`, plus `.dispatch` / `.member_tick` / `.review_tick` when review is active)
+emit OpenTelemetry spans when
 [`instrument_pydantic_team`][pydantic_team.instrument_pydantic_team] is enabled.
 Board tool calls are visible via `logfire.instrument_pydantic_ai()` — see
 [Observability](index.md#observability).
@@ -133,10 +153,20 @@ Board tool calls are visible via `logfire.instrument_pydantic_ai()` — see
 ## Task model
 
 See [`Task`][pydantic_team.board.Task] / [`TaskStatus`][pydantic_team.board.TaskStatus]:
-`open` → `claimed` → `done`, with optional `assignee` and `result`.
+
+`open` → `claimed` → `done` when no reviewer is set.
+
+With a reviewer: `claimed` (or `needs_revision`) → `pending_review` → `done` (approve)
+or `needs_revision` (reject). Fields: optional `assignee`, `result`, `reviewer`,
+`rejection_reason`.
 
 Peer messages use [`BoardMessage`][pydantic_team.board.BoardMessage] on the same board
 (`sender`, `to`, `body`, optional `task_id`).
+
+Live example with review:
+[`examples/collaborative_review.py`](https://github.com/etiqa/pydantic-team/blob/main/examples/collaborative_review.py)
+(`require_review=True`; default path without a gate remains
+[`examples/collaborative_basic.py`](https://github.com/etiqa/pydantic-team/blob/main/examples/collaborative_basic.py)).
 
 ## Testing
 

@@ -17,6 +17,8 @@ from pydantic_team.collaborative import (
     BoardDeps,
     DispatchMode,
     add_task,
+    approve_task,
+    assign_reviewer,
     assign_task,
     claim_task,
     complete_task,
@@ -24,11 +26,13 @@ from pydantic_team.collaborative import (
     list_messages,
     list_tasks,
     member_work_prompt,
+    reject_task,
     replan_user_prompt,
+    review_work_prompt,
     seed_user_prompt,
     send_message,
 )
-from pydantic_team.events import MessagePosted, PhaseJoined, RunEnded, TasksScheduled, TeamEvent
+from pydantic_team.events import MessagePosted, PhaseJoined, RunEnded, TaskReviewDecided, TasksScheduled, TeamEvent
 
 
 @dataclass
@@ -150,6 +154,9 @@ async def test_collaborative_leader_tools_create_tasks() -> None:
     tool_names = {t.name for t in leader_model.last_model_request_parameters.function_tools}
     assert 'add_task' in tool_names
     assert 'assign_task' in tool_names
+    assert 'assign_reviewer' in tool_names
+    assert 'approve_task' in tool_names
+    assert 'reject_task' in tool_names
     assert 'list_tasks' in tool_names
 
 
@@ -167,6 +174,8 @@ async def test_collaborative_member_tools_include_claim() -> None:
     tool_names = {t.name for t in worker_model.last_model_request_parameters.function_tools}
     assert 'claim_task' in tool_names
     assert 'complete_task' in tool_names
+    assert 'approve_task' in tool_names
+    assert 'reject_task' in tool_names
 
 
 async def test_collaborative_from_leader_model() -> None:
@@ -980,3 +989,270 @@ async def test_streaming_propagates_member_errors(monkeypatch: pytest.MonkeyPatc
 
     with pytest.raises(RuntimeError, match='member failed'):
         await team.run('Ship it')
+
+
+async def test_require_review_add_task_stamps_leader_as_reviewer() -> None:
+    board = TaskBoard()
+    ctx = _ctx(board, 'leader', member_ids=('worker',))
+    cast(BoardDeps, ctx.deps).require_review = True
+    cast(BoardDeps, ctx.deps).leader_id = 'leader'
+    msg = await add_task(ctx, 'Draft')
+    assert 'reviewer=leader' in msg
+    task = (await board.list_tasks())[0]
+    assert task.reviewer == 'leader'
+
+
+async def test_assign_approve_reject_tools() -> None:
+    board = TaskBoard()
+    emitted: list[TeamEvent] = []
+
+    async def _emit(event: TeamEvent) -> None:
+        emitted.append(event)
+
+    leader = _ctx(board, 'leader', member_ids=('worker',), emit=_emit)
+    cast(BoardDeps, leader.deps).leader_id = 'leader'
+    worker = _ctx(board, 'worker', member_ids=('worker',), emit=_emit)
+    cast(BoardDeps, worker.deps).leader_id = 'leader'
+
+    await add_task(leader, 'Write')
+    task = (await board.list_tasks())[0]
+    assert 'Error: unknown reviewer' in await assign_reviewer(leader, task.id, 'ghost')
+    assert 'Reviewer' in await assign_reviewer(leader, task.id, 'leader')
+    await assign_task(leader, task.id, 'worker')
+    assert 'Submitted' in await complete_task(worker, task.id, 'draft v1')
+    assert 'Error' in await approve_task(worker, task.id)
+    assert 'Rejected' in await reject_task(leader, task.id, 'expand')
+    assert any(isinstance(e, TaskReviewDecided) and e.decision == 'rejected' for e in emitted)
+    assert 'Submitted' in await complete_task(worker, task.id, 'draft v2')
+    assert 'Approved' in await approve_task(leader, task.id)
+    assert any(isinstance(e, TaskReviewDecided) and e.decision == 'approved' for e in emitted)
+    assert board.is_complete()
+
+
+async def test_member_work_prompt_includes_revision_and_reviews() -> None:
+    board = TaskBoard()
+    task = await board.add_task('Write', reviewer='leader')
+    await board.assign(task.id, 'writer')
+    await board.complete(task.id, result='v1', agent_id='writer')
+    await board.reject(task.id, reason='short', agent_id='leader')
+    assignee_prompt = member_work_prompt('Goal', 'writer', board)
+    assert 'short' in assignee_prompt
+    assert 'v1' in assignee_prompt
+    assert TaskStatus.NEEDS_REVISION.value in assignee_prompt or 'NEEDS_REVISION' in assignee_prompt
+    review_prompt = review_work_prompt('Goal', 'leader', board)
+    # still needs_revision until complete again
+    assert 'awaiting your review' in review_prompt.lower() or 'Tasks awaiting' in review_prompt
+    await board.complete(task.id, result='v2', agent_id='writer')
+    review_prompt2 = review_work_prompt('Goal', 'leader', board)
+    assert task.id in review_prompt2
+    assert 'v2' in review_prompt2
+
+
+async def test_phased_require_review_leader_approves(monkeypatch: pytest.MonkeyPatch) -> None:
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=2,
+        max_replans=0,
+        require_review=True,
+        dispatch_mode='phased',
+    )
+
+    async def _leader_run(user_prompt: str, **kwargs: object) -> object:
+        deps = _deps_from_kwargs(kwargs)
+        assert deps is not None
+        if 'awaiting your review' in user_prompt.lower() or 'Review pending' in user_prompt:
+            for task in deps.board.snapshot():
+                if task.status is TaskStatus.PENDING_REVIEW:
+                    await deps.board.approve(task.id, agent_id='leader')
+            return _FakeRunResult(output='reviewed')
+        if 'Synthesize' in user_prompt:
+            return _FakeRunResult(output='final')
+        task = await deps.board.add_task('Do work', reviewer='leader')
+        await deps.board.assign(task.id, 'worker')
+        return _FakeRunResult(output='seeded')
+
+    async def _worker_run(user_prompt: str, **kwargs: object) -> object:
+        deps = _deps_from_kwargs(kwargs)
+        assert deps is not None
+        for task in deps.board.snapshot():
+            if task.assignee == 'worker' and task.status in (TaskStatus.CLAIMED, TaskStatus.NEEDS_REVISION):
+                await deps.board.complete(task.id, result='done', agent_id='worker')
+        return _FakeRunResult(output='worked')
+
+    monkeypatch.setattr(leader, 'run', _leader_run)
+    monkeypatch.setattr(worker, 'run', _worker_run)
+
+    async with team.iter('Ship with review') as run:
+        async for _event in run:
+            pass
+    assert run.result is not None
+    assert run.result.data == 'final'
+    assert run.board.is_complete()
+
+
+async def test_member_prompt_lists_pending_reviews_for_reviewer() -> None:
+    board = TaskBoard()
+    task = await board.add_task('Check', reviewer='verifier')
+    await board.assign(task.id, 'writer')
+    await board.complete(task.id, result='draft', agent_id='writer')
+    prompt = member_work_prompt('Goal', 'verifier', board)
+    assert task.id in prompt
+    assert 'draft' in prompt
+
+
+async def test_assign_reviewer_board_error() -> None:
+    board = TaskBoard()
+    ctx = _ctx(board, 'leader', member_ids=('worker',))
+    cast(BoardDeps, ctx.deps).leader_id = 'leader'
+    assert 'Error' in await assign_reviewer(ctx, 'missing', 'leader')
+
+
+async def test_approve_reject_without_emit() -> None:
+    board = TaskBoard()
+    task = await board.add_task('X', reviewer='leader')
+    await board.assign(task.id, 'worker')
+    await board.complete(task.id, result='v1', agent_id='worker')
+    leader = _ctx(board, 'leader', member_ids=('worker',), emit=None)
+    cast(BoardDeps, leader.deps).leader_id = 'leader'
+    assert 'Rejected' in await reject_task(leader, task.id, 'fix')
+    await board.complete(task.id, result='v2', agent_id='worker')
+    assert 'Approved' in await approve_task(leader, task.id)
+
+
+async def test_phased_review_tick_ignores_empty_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=2,
+        require_review=True,
+        dispatch_mode='phased',
+    )
+    review_calls = 0
+
+    async def _leader_run(user_prompt: str, **kwargs: object) -> object:
+        nonlocal review_calls
+        deps = _deps_from_kwargs(kwargs)
+        assert deps is not None
+        if 'awaiting your review' in user_prompt.lower():
+            review_calls += 1
+            if review_calls == 1:
+                raise UnexpectedModelBehavior('empty')
+            for task in deps.board.snapshot():
+                if task.status is TaskStatus.PENDING_REVIEW:
+                    await deps.board.approve(task.id, agent_id='leader')
+            return _FakeRunResult(output='ok')
+        if 'Synthesize' in user_prompt:
+            return _FakeRunResult(output='final')
+        task = await deps.board.add_task('T', reviewer='leader')
+        await deps.board.assign(task.id, 'worker')
+        return _FakeRunResult(output='seed')
+
+    async def _worker_run(user_prompt: str, **kwargs: object) -> object:
+        deps = _deps_from_kwargs(kwargs)
+        assert deps is not None
+        for task in deps.board.snapshot():
+            if task.assignee == 'worker' and task.status is TaskStatus.CLAIMED:
+                await deps.board.complete(task.id, result='x', agent_id='worker')
+        return _FakeRunResult(output='w')
+
+    monkeypatch.setattr(leader, 'run', _leader_run)
+    monkeypatch.setattr(worker, 'run', _worker_run)
+    result = await team.run('goal')
+    assert result.data == 'final'
+    assert review_calls >= 1
+
+
+async def test_streaming_require_review_leader_approves(monkeypatch: pytest.MonkeyPatch) -> None:
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=3,
+        max_replans=0,
+        require_review=True,
+        dispatch_mode='streaming',
+    )
+
+    async def _leader_run(user_prompt: str, **kwargs: object) -> object:
+        deps = _deps_from_kwargs(kwargs)
+        assert deps is not None
+        if 'awaiting your review' in user_prompt.lower():
+            for task in deps.board.snapshot():
+                if task.status is TaskStatus.PENDING_REVIEW:
+                    await deps.board.approve(task.id, agent_id='leader')
+            return _FakeRunResult(output='reviewed')
+        if 'Synthesize' in user_prompt:
+            return _FakeRunResult(output='final')
+        task = await deps.board.add_task('Do work', reviewer='leader')
+        await deps.board.assign(task.id, 'worker')
+        return _FakeRunResult(output='seeded')
+
+    async def _worker_run(user_prompt: str, **kwargs: object) -> object:
+        deps = _deps_from_kwargs(kwargs)
+        assert deps is not None
+        for task in deps.board.snapshot():
+            if task.assignee == 'worker' and task.status is TaskStatus.CLAIMED:
+                await deps.board.complete(task.id, result='done', agent_id='worker')
+        return _FakeRunResult(output='worked')
+
+    monkeypatch.setattr(leader, 'run', _leader_run)
+    monkeypatch.setattr(worker, 'run', _worker_run)
+
+    async with team.iter('Ship streaming review') as run:
+        async for _event in run:
+            pass
+    assert run.result is not None
+    assert run.result.data == 'final'
+    assert run.board.is_complete()
+
+
+async def test_streaming_review_empty_model_then_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    leader = Agent(TestModel(), name='leader')
+    worker = Agent(TestModel(), name='worker')
+    team = CollaborativeTeam(
+        leader_agent=leader,
+        members=[worker],
+        max_rounds=1,
+        max_replans=0,
+        require_review=True,
+        dispatch_mode='streaming',
+    )
+    review_calls = 0
+
+    async def _leader_run(user_prompt: str, **kwargs: object) -> object:
+        nonlocal review_calls
+        deps = _deps_from_kwargs(kwargs)
+        assert deps is not None
+        if 'awaiting your review' in user_prompt.lower():
+            review_calls += 1
+            raise UnexpectedModelBehavior('empty review')
+        if 'Synthesize' in user_prompt:
+            return _FakeRunResult(output='final-incomplete')
+        task = await deps.board.add_task('Do work', reviewer='leader')
+        await deps.board.assign(task.id, 'worker')
+        return _FakeRunResult(output='seeded')
+
+    async def _worker_run(user_prompt: str, **kwargs: object) -> object:
+        deps = _deps_from_kwargs(kwargs)
+        assert deps is not None
+        for task in deps.board.snapshot():
+            if task.assignee == 'worker' and task.status is TaskStatus.CLAIMED:
+                await deps.board.complete(task.id, result='done', agent_id='worker')
+        return _FakeRunResult(output='worked')
+
+    monkeypatch.setattr(leader, 'run', _leader_run)
+    monkeypatch.setattr(worker, 'run', _worker_run)
+
+    async with team.iter('Ship') as run:
+        async for _event in run:
+            pass
+    assert run.result is not None
+    assert run.result.data == 'final-incomplete'
+    assert review_calls == 1
+    assert not run.board.is_complete()
